@@ -56,7 +56,7 @@
   <div class="side-label">NAVIGATION</div>
   <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
   <button class="nav" data-page="servers"><span>02</span> My Servers</button>
-  <div id="rootNav" class="hidden" data-root-nav="true">
+  <div id="rootNav" class="hidden">
     <button class="nav" data-page="profile"><span>03</span> Profile</button>
     <button class="nav" data-page="apiKeys"><span>04</span> API / Access Keys</button>
   </div>
@@ -103,11 +103,41 @@
 <div id="apiKeys" class="page hidden root-only">
   <div class="section-head page-heading"><div><label>ROOT / ADMIN</label><h1>API / Access Keys</h1><p>Key rahasia untuk membuat akun dan server melalui API.</p></div><button class="ghost refresh-btn" onclick="loadApiKeys()">↻ <span>Refresh</span></button></div>
   <div class="profile-grid">
-    <div class="card admin-form"><div class="profile-kicker">CREATE ACCESS KEY</div><h2>New Secret Key</h2><p>Secret hanya ditampilkan sekali. Database hanya menyimpan hash key.</p><input id="keyName" placeholder="Key name, contoh: Bot Provisioner"><label class="scope-title">PERMISSIONS</label><label class="check-row"><input id="scopeUsers" type="checkbox" checked> <span>users:create</span></label><label class="check-row"><input id="scopeServers" type="checkbox" checked> <span>servers:create</span></label><button class="primary wide" onclick="createAccessKey()">CREATE ACCESS KEY</button><div id="newSecretBox" class="secret-box hidden"><small>SHOW ONCE — SIMPAN DI TEMPAT AMAN</small><code id="newSecret"></code><button class="ghost" onclick="copySecret()">COPY KEY</button></div></div>
-    <div class="card api-info"><div class="profile-kicker">API USAGE</div><h2>Provisioning</h2><pre>Authorization: Bearer fx_live_...
+    <div class="card admin-form api-key-builder"><div class="profile-kicker">CREATE ACCESS KEY</div><h2>New Secret Key</h2><p>Secret hanya ditampilkan sekali. Database hanya menyimpan hash key.</p><input id="keyName" placeholder="Key name, contoh: Bot Provisioner"><label class="scope-title">PERMISSIONS</label><div class="scope-grid">
+<label class="scope-chip"><input id="scopeUsers" type="checkbox" checked><span>users:create</span></label>
+<label class="scope-chip"><input id="scopeUsersRead" type="checkbox" checked><span>users:read</span></label>
+<label class="scope-chip"><input id="scopeUsersDelete" type="checkbox" checked><span>users:delete</span></label>
+<label class="scope-chip"><input id="scopeServers" type="checkbox" checked><span>servers:create</span></label>
+<label class="scope-chip"><input id="scopeServersRead" type="checkbox" checked><span>servers:read</span></label>
+<label class="scope-chip"><input id="scopeServersManage" type="checkbox" checked><span>servers:manage</span></label>
+<label class="scope-chip"><input id="scopeServersDelete" type="checkbox" checked><span>servers:delete</span></label>
+<label class="scope-chip"><input id="scopeStats" type="checkbox" checked><span>stats:read</span></label>
+<label class="scope-chip"><input id="scopeWeb" type="checkbox" checked><span>web:ping</span></label>
+</div><button class="primary wide" onclick="createAccessKey()">CREATE ACCESS KEY</button><div id="newSecretBox" class="secret-box hidden"><small>SHOW ONCE — SIMPAN DI TEMPAT AMAN</small><code id="newSecret"></code><button class="ghost" onclick="copySecret()">COPY KEY</button></div></div>
+    <div class="card api-info"><div class="profile-kicker">API USAGE</div><h2>Full Control API</h2><pre>Authorization: Bearer fx_live_...
+
+GET  /api/access/overview
+GET  /api/access/users
+POST /api/access/users
+DELETE /api/access/users/:id
+
+GET  /api/access/servers
+GET  /api/access/servers/total
+GET  /api/access/servers/:id
+GET  /api/access/servers/:id/runtime
+GET  /api/access/servers/:id/stats
+POST /api/access/servers/:id/start
+POST /api/access/servers/:id/stop
+POST /api/access/servers/:id/restart
+POST /api/access/servers/:id/suspend
+POST /api/access/servers/:id/unsuspend
+DELETE /api/access/servers/:id
+
+POST /api/access/web/ping
+POST /api/access/servers/:id/web/ping
 
 POST /api/access/users
-POST /api/servers</pre><p>Untuk /api/servers dengan access key, kirim <b>userId</b> pada body. Root tidak dapat dibuat melalui API key.</p></div>
+POST /api/servers</pre><p>API key hanya dapat membuat akun <b>non-root</b>. Server yang dibuat lewat access key memakai <b>userId</b>. Server milik ROOT/ADMIN dilindungi dari penghapusan API.</p></div>
   </div>
   <div class="section-head"><div><label>KEYS</label><h2>Active & Revoked Keys</h2></div></div><div id="keyList" class="admin-list"></div>
 </div>
@@ -148,10 +178,11 @@ POST /api/servers</pre><p>Untuk /api/servers dengan access key, kirim <b>userId<
 <select id="newRuntime"><option value="node">Node.js</option><option value="python">Python</option><option value="custom">Custom</option></select>
 <input id="newEntry" placeholder="Entry file" value="index.js">
 <input id="newCommand" placeholder="Start command" value="node index.js">
+<div class="modal-inline"><input id="newWebUrl" placeholder="Web URL (optional), contoh https://bot.example.com"><input id="newWebPort" type="number" min="1" max="65535" placeholder="Web port"></div>
 <label class="modal-label">RAM ALLOCATION</label>
 <div class="ram-input-row"><input id="newMemory" type="number" min="64" max="32768" step="64" value="512" placeholder="512"><span>MB</span></div>
 <div class="preset-row"><button type="button" class="ghost" data-memory="256">256 MB</button><button type="button" class="ghost" data-memory="512">512 MB</button><button type="button" class="ghost" data-memory="1024">1 GB</button><button type="button" class="ghost" data-memory="2048">2 GB</button></div>
 <button class="primary wide" onclick="createServer()">CREATE SERVER</button></div></div>
-<script src="/app.js?v=20261002-rootfix2"></script>
+<script src="/app.js"></script>
 </body>
 </html>

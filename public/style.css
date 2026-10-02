@@ -226,3 +226,61 @@ aside .mobile-create:active{transform:translateY(0)}
 /* Root/Admin account + API pages. Existing theme is intentionally preserved. */
 .profile-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,1fr);gap:12px}.profile-card,.admin-form,.api-info{min-height:220px}.profile-kicker{font-size:9px;color:#707887;letter-spacing:.18em;font-weight:800}.profile-card h2,.admin-form h2,.api-info h2{margin:9px 0 8px;font-size:22px}.profile-card>p,.admin-form>p,.api-info>p{color:#737c8a;line-height:1.55}.root-badge{display:inline-flex;border:1px solid #294b38;background:#12231a;color:#7ae0a1;border-radius:999px;padding:6px 9px;font-size:9px;letter-spacing:.08em;font-weight:800}.profile-meta{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #20242d;margin-top:15px;padding-top:12px;color:#626b79;font-size:10px}.profile-meta b{color:#c9ced7;font-weight:600;overflow-wrap:anywhere;text-align:right}.check-row{display:flex;align-items:center;gap:8px;color:#aeb5c0;font-size:11px;margin:7px 0}.check-row input{width:auto;margin:0;accent-color:#f1f3f5}.scope-title{display:block;margin-top:13px}.secret-box{margin-top:14px;border:1px solid #344052;background:#090c11;border-radius:12px;padding:12px}.secret-box small{display:block;color:#e6b36d;font-size:8px;letter-spacing:.14em;margin-bottom:8px}.secret-box code{display:block;white-space:pre-wrap;word-break:break-all;color:#d9dee7;font:11px/1.55 ui-monospace,Consolas,monospace;margin-bottom:9px}.api-info pre{margin:16px 0 0;padding:13px;border:1px solid #202530;border-radius:11px;background:#080a0e;color:#bfc6d0;white-space:pre-wrap;font:11px/1.7 ui-monospace,Consolas,monospace}.admin-list{display:grid;gap:8px}.admin-row{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid #222731;background:#0d1015;border-radius:13px;padding:14px 16px}.admin-row>div:first-child{min-width:0}.admin-row b{display:block;color:#e4e8ee;font-size:12px}.admin-row small{display:block;color:#69717f;font-size:9px;margin-top:5px;overflow-wrap:anywhere}.key-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}.key-actions .status{white-space:nowrap}.root-only{min-width:0}
 @media(max-width:800px){.profile-grid{grid-template-columns:1fr}.profile-card,.admin-form,.api-info{min-height:0}.admin-row{align-items:flex-start;flex-direction:column}.key-actions{width:100%;justify-content:space-between}.root-only .section-head{align-items:flex-start}}
+
+
+/* =========================================================
+   ACCOUNT + API KEY — PRECISION POLISH
+   Keeps the existing FRANXX visual language; only improves
+   spacing, hierarchy, readability and mobile fit.
+   ========================================================= */
+.root-only .page-heading h1{letter-spacing:-.035em}
+.root-only .page-heading p{max-width:680px;color:#687180}
+.profile-grid{align-items:stretch}
+.profile-grid>.card{position:relative;overflow:hidden;border-color:#252b35;background:
+  radial-gradient(circle at 100% 0,rgba(255,255,255,.045),transparent 34%),
+  linear-gradient(145deg,#11151b,#0b0e13)}
+.profile-grid>.card:after{content:"";position:absolute;inset:auto -70px -90px auto;width:190px;height:190px;border:1px solid rgba(255,255,255,.045);border-radius:50%;pointer-events:none}
+.profile-card,.admin-form,.api-info{padding:22px}
+.profile-card h2,.admin-form h2,.api-info h2{letter-spacing:-.025em}
+.profile-kicker{display:flex;align-items:center;gap:8px}
+.profile-kicker:before{content:"";width:5px;height:5px;border-radius:50%;background:#737d8d;box-shadow:0 0 10px rgba(255,255,255,.18)}
+.profile-card .root-badge{margin-top:12px}
+.profile-meta{background:rgba(255,255,255,.012);border-radius:10px;padding:11px 12px;margin-top:9px;border-top:1px solid #1e232c}
+.admin-form input:not([type="checkbox"]),.api-key-builder input:not([type="checkbox"]){
+  border-color:#252b35;background:#090c11;box-shadow:inset 0 1px rgba(255,255,255,.018)
+}
+.admin-form input:not([type="checkbox"]):focus,.api-key-builder input:not([type="checkbox"]):focus{
+  border-color:#4a5361;box-shadow:0 0 0 3px rgba(255,255,255,.035)
+}
+.scope-title{font-size:9px;color:#697280;letter-spacing:.16em;font-weight:800}
+.scope-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:9px 0 13px}
+.scope-chip{display:flex;align-items:center;gap:8px;min-width:0;padding:9px 10px;border:1px solid #232934;border-radius:10px;background:#0a0d12;color:#aeb6c2;font-size:9px;line-height:1.2;cursor:pointer;transition:.15s ease}
+.scope-chip:hover{border-color:#353d49;background:#0e1218}
+.scope-chip input{margin:0;accent-color:#dfe4eb}
+.scope-chip span{overflow-wrap:anywhere}
+.api-info pre{max-height:360px;overflow:auto;border-color:#222833;box-shadow:inset 0 1px rgba(255,255,255,.02)}
+.api-info p{font-size:10px}
+.key-row{min-height:66px;background:linear-gradient(145deg,#0e1217,#0a0d12);border-color:#202630}
+.key-row:hover{border-color:#2e3540;transform:translateY(-1px)}
+.key-row .status{font-size:8px;letter-spacing:.09em}
+.key-actions .tiny{min-height:31px}
+.secret-box{background:linear-gradient(145deg,#0a0e13,#07090d);border-color:#3a4350;box-shadow:0 14px 35px rgba(0,0,0,.22)}
+.secret-box code{padding:9px 10px;border:1px solid #202630;border-radius:9px;background:#06080b}
+.api-key-builder .wide{margin-top:2px}
+.root-only .admin-list{margin-top:3px}
+@media(max-width:800px){
+  .profile-card,.admin-form,.api-info{padding:18px}
+  .scope-grid{grid-template-columns:1fr 1fr}
+  .api-info pre{max-height:300px;font-size:9px}
+  .key-row{gap:12px}
+}
+@media(max-width:430px){
+  .scope-grid{grid-template-columns:1fr}
+  .scope-chip{padding:10px}
+  .profile-card h2,.admin-form h2,.api-info h2{font-size:19px}
+}
+
+/* Create-server web monitor fields */
+.modal-inline{display:grid;grid-template-columns:minmax(0,1fr) 120px;gap:8px}
+.modal-inline input{min-width:0}
+@media(max-width:430px){.modal-inline{grid-template-columns:1fr}}
