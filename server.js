@@ -241,6 +241,9 @@ function publicServer(s) {
     id: s.id, name: s.name, runtime: s.runtime, entry: s.entry,
     command: s.command, memoryLimit: Number(s.memoryLimit || 512),
     createdAt: s.createdAt,
+    suspended: Boolean(s.suspended),
+    suspendedAt: s.suspendedAt || null,
+    suspendedReason: s.suspendedReason || null,
     status: processes.has(s.id) ? "online" : "offline"
   };
 }
@@ -330,6 +333,7 @@ wss.on("connection", async (ws, req) => {
 });
 
 function runServer(s) {
+  if (s.suspended) throw new Error("Server sedang disuspend");
   if (processes.has(s.id)) throw new Error("Server already running");
   const cwd = serverRoot(s.id);
   fs.mkdirSync(cwd, { recursive: true });
@@ -485,34 +489,152 @@ function rootAuth(req, res, next) {
   }).catch(e => res.status(500).json({ error: e.message }));
 }
 
+// ============================================================
+// FRANXX PTERO — FULL ACCESS-KEY API
+// API keys can provision users/servers and manage all servers.
+// The first/root admin server is protected from deletion.
+// ============================================================
+const API_SCOPES = [
+  "users:create",
+  "users:read",
+  "users:delete",
+  "servers:create",
+  "servers:read",
+  "servers:start",
+  "servers:stop",
+  "servers:restart",
+  "servers:suspend",
+  "servers:unsuspend",
+  "servers:delete",
+  "servers:stats"
+];
+
 function normalizeScopes(scopes) {
-  const allowed = new Set(["users:create", "servers:create"]);
-  return [...new Set((Array.isArray(scopes) ? scopes : []).map(String).filter(x => allowed.has(x)))];
+  const incoming = Array.isArray(scopes) ? scopes.map(String) : [];
+  const valid = incoming.filter(x => API_SCOPES.includes(x));
+
+  // Backward compatibility: the old API-key screen only created
+  // users:create + servers:create. Treat that legacy pair as a full
+  // management key so existing tokens keep working after this update.
+  if (valid.includes("users:create") && valid.includes("servers:create")) {
+    return [...API_SCOPES];
+  }
+
+  return [...new Set(valid)];
 }
+
+function effectiveApiKeyScopes(key) {
+  const scopes = normalizeScopes(key?.scopes);
+  return scopes;
+}
+
 function hashAccessKey(secret) {
   return crypto.createHash("sha256").update(secret).digest("hex");
 }
+
 function apiKeyAuth(req, res, next) {
   (async () => {
     const h = req.headers.authorization || "";
-    if (!h.startsWith("Bearer ")) return res.status(401).json({ error: "Access key diperlukan" });
+    if (!h.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access key diperlukan" });
+    }
+
     const secret = h.slice(7).trim();
-    if (!secret.startsWith("fx_live_")) return res.status(401).json({ error: "Access key tidak valid" });
+    if (!secret.startsWith("fx_live_")) {
+      return res.status(401).json({ error: "Access key tidak valid" });
+    }
+
     const keys = await readAccessKeys();
     const hash = hashAccessKey(secret);
     const key = keys.find(k => {
       if (k.revokedAt || typeof k.keyHash !== "string" || k.keyHash.length !== hash.length) return false;
-      return crypto.timingSafeEqual(Buffer.from(k.keyHash), Buffer.from(hash));
+      try {
+        return crypto.timingSafeEqual(Buffer.from(k.keyHash), Buffer.from(hash));
+      } catch {
+        return false;
+      }
     });
-    if (!key) return res.status(401).json({ error: "Access key tidak valid atau sudah direvoke" });
-    req.apiKey = key;
+
+    if (!key) {
+      return res.status(401).json({ error: "Access key tidak valid atau sudah direvoke" });
+    }
+
+    // Do not expose the raw key or hash to route handlers.
+    req.apiKey = {
+      id: key.id,
+      name: key.name,
+      ownerId: key.ownerId,
+      scopes: effectiveApiKeyScopes(key)
+    };
+
     next();
   })().catch(e => res.status(500).json({ error: e.message || "Access key database error" }));
 }
+
 function requireScope(scope) {
   return (req, res, next) => {
-    if (!req.apiKey || !req.apiKey.scopes.includes(scope)) return res.status(403).json({ error: `Scope ${scope} diperlukan` });
+    if (!req.apiKey || !req.apiKey.scopes.includes(scope)) {
+      return res.status(403).json({ error: `Scope ${scope} diperlukan` });
+    }
     next();
+  };
+}
+
+async function getAllServers() {
+  return readJson(SERVERS_FILE);
+}
+
+async function getAllUsersForApi() {
+  return readUsers();
+}
+
+function isServerOnline(serverId) {
+  return processes.has(serverId);
+}
+
+function rootAccountForProtection(users) {
+  const rootName = ROOT_USERNAME.toLowerCase();
+  return users.find(u => String(u.username || "").toLowerCase() === rootName)
+    || users.find(u => u.root === true)
+    || null;
+}
+
+function protectedRootServerId(servers, users) {
+  const root = rootAccountForProtection(users);
+  if (!root) return null;
+
+  const owned = servers
+    .filter(s => String(s.ownerId) === String(root.id))
+    .sort((a, b) => {
+      const aa = new Date(a.createdAt || 0).getTime();
+      const bb = new Date(b.createdAt || 0).getTime();
+      return aa - bb || String(a.id).localeCompare(String(b.id));
+    });
+
+  return owned[0]?.id || null;
+}
+
+function apiServerView(server, users, protectedId) {
+  const owner = users.find(u => String(u.id) === String(server.ownerId));
+  return {
+    id: server.id,
+    name: server.name,
+    ownerId: server.ownerId,
+    owner: owner ? {
+      id: owner.id,
+      username: owner.username,
+      root: Boolean(owner.root) || String(owner.username).toLowerCase() === ROOT_USERNAME.toLowerCase()
+    } : null,
+    runtime: server.runtime,
+    entry: server.entry,
+    command: server.command,
+    memoryLimit: Number(server.memoryLimit || 512),
+    status: isServerOnline(server.id) ? "online" : "offline",
+    suspended: Boolean(server.suspended),
+    suspendedAt: server.suspendedAt || null,
+    suspendedReason: server.suspendedReason || null,
+    protected: server.id === protectedId,
+    createdAt: server.createdAt
   };
 }
 
@@ -565,17 +687,298 @@ app.post("/api/root/access-keys/:id/revoke", auth, rootAuth, async (req, res) =>
 app.post("/api/access/users", apiKeyAuth, requireScope("users:create"), async (req, res) => {
   const username = String(req.body.username || "").trim().toLowerCase();
   const password = String(req.body.password || "");
-  const root = Boolean(req.body.root);
-  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
-  if (password.length < 6) return res.status(400).json({ error: "Password minimal 6 karakter" });
-  // API keys may create normal users only; root elevation remains a root-panel action.
-  if (root) return res.status(403).json({ error: "API key tidak boleh membuat akun root" });
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) {
+    return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: "Password minimal 6 karakter" });
+  }
+
+  // Access keys can NEVER create/elevate a root account.
   const users = await readUsers();
-  if (users.some(u => u.username === username)) return res.status(409).json({ error: "Username sudah digunakan" });
-  const user = { id: id("usr"), username, password: await bcrypt.hash(password, 12), root: false, createdAt: new Date().toISOString() };
+  if (users.some(u => u.username === username)) {
+    return res.status(409).json({ error: "Username sudah digunakan" });
+  }
+
+  const user = {
+    id: id("usr"),
+    username,
+    password: await bcrypt.hash(password, 12),
+    root: false,
+    createdAt: new Date().toISOString()
+  };
+
   users.push(user);
   await writeUsers(users, `API create user ${username}`);
-  res.json({ id: user.id, username: user.username, root: false, createdAt: user.createdAt });
+
+  res.json({
+    ok: true,
+    id: user.id,
+    username: user.username,
+    root: false,
+    createdAt: user.createdAt
+  });
+});
+
+app.get("/api/access/users", apiKeyAuth, requireScope("users:read"), async (req, res) => {
+  const users = await getAllUsersForApi();
+  res.json({
+    total: users.length,
+    users: users.map(u => ({
+      id: u.id,
+      username: u.username,
+      root: Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME.toLowerCase(),
+      createdAt: u.createdAt
+    }))
+  });
+});
+
+app.get("/api/access/users/:id", apiKeyAuth, requireScope("users:read"), async (req, res) => {
+  const users = await getAllUsersForApi();
+  const user = users.find(u => String(u.id) === String(req.params.id));
+  if (!user) return res.status(404).json({ error: "User tidak ditemukan" });
+
+  const servers = await getAllServers();
+  res.json({
+    id: user.id,
+    username: user.username,
+    root: Boolean(user.root) || String(user.username).toLowerCase() === ROOT_USERNAME.toLowerCase(),
+    createdAt: user.createdAt,
+    servers: servers.filter(s => String(s.ownerId) === String(user.id)).map(s => s.id)
+  });
+});
+
+app.delete("/api/access/users/:id", apiKeyAuth, requireScope("users:delete"), async (req, res) => {
+  const users = await getAllUsersForApi();
+  const user = users.find(u => String(u.id) === String(req.params.id));
+  if (!user) return res.status(404).json({ error: "User tidak ditemukan" });
+
+  const isRoot = Boolean(user.root) || String(user.username).toLowerCase() === ROOT_USERNAME.toLowerCase();
+  if (isRoot) {
+    return res.status(403).json({ error: "Akun ROOT/ADMIN tidak boleh dihapus melalui API key" });
+  }
+
+  const servers = await getAllServers();
+  const owned = servers.filter(s => String(s.ownerId) === String(user.id));
+  const online = owned.filter(s => isServerOnline(s.id));
+  if (online.length) {
+    return res.status(409).json({
+      error: "User masih memiliki server yang online. Stop server terlebih dahulu.",
+      onlineServers: online.map(s => s.id)
+    });
+  }
+
+  const nextServers = servers.filter(s => String(s.ownerId) !== String(user.id));
+  await writeJson(SERVERS_FILE, nextServers);
+  for (const s of owned) {
+    await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
+  }
+
+  const nextUsers = users.filter(u => String(u.id) !== String(user.id));
+  await writeUsers(nextUsers, `API delete user ${user.username}`);
+
+  res.json({
+    ok: true,
+    deletedUser: user.id,
+    deletedServers: owned.map(s => s.id)
+  });
+});
+
+// Create server through an access key. The owner must already exist and
+// is always used as a normal account; the API key itself never becomes root.
+app.post("/api/access/servers", apiKeyAuth, requireScope("servers:create"), async (req, res) => {
+  const ownerId = String(req.body.userId || "").trim();
+  if (!ownerId) return res.status(400).json({ error: "userId wajib diisi" });
+
+  const users = await getAllUsersForApi();
+  const owner = users.find(u => String(u.id) === ownerId);
+  if (!owner) return res.status(404).json({ error: "User tujuan tidak ditemukan" });
+
+  const name = safeName(req.body.name || "My Server");
+  const runtime = ["node", "python", "custom"].includes(req.body.runtime) ? req.body.runtime : "node";
+  const entry = safeName(req.body.entry || (runtime === "python" ? "main.py" : "index.js"));
+  const command = String(req.body.command || (runtime === "python" ? "python main.py" : "node index.js")).trim();
+  if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
+  const memoryLimit = parseMemoryMB(req.body.memoryLimit, 512);
+
+  const servers = await getAllServers();
+  const s = {
+    id: id("srv"),
+    ownerId,
+    name,
+    runtime,
+    entry,
+    command,
+    memoryLimit,
+    env: {},
+    suspended: false,
+    createdAt: new Date().toISOString()
+  };
+
+  servers.push(s);
+  await writeJson(SERVERS_FILE, servers);
+  await fsp.mkdir(serverRoot(s.id), { recursive: true });
+
+  const protectedId = protectedRootServerId(servers, users);
+  res.json({ ok: true, server: apiServerView(s, users, protectedId) });
+});
+
+app.get("/api/access/servers", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const protectedId = protectedRootServerId(servers, users);
+  const list = servers.map(s => apiServerView(s, users, protectedId));
+  res.json({ total: list.length, servers: list });
+});
+
+app.get("/api/access/servers/total", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const servers = await getAllServers();
+  res.json({ total: servers.length });
+});
+
+app.get("/api/access/servers/:id", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const s = servers.find(x => x.id === req.params.id);
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  const protectedId = protectedRootServerId(servers, users);
+  res.json(apiServerView(s, users, protectedId));
+});
+
+async function getApiServerOr404(req, res) {
+  const servers = await getAllServers();
+  const s = servers.find(x => x.id === req.params.id);
+  if (!s) {
+    res.status(404).json({ error: "Server tidak ditemukan" });
+    return null;
+  }
+  return { servers, server: s };
+}
+
+app.post("/api/access/servers/:id/start", apiKeyAuth, requireScope("servers:start"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const { server: s, servers } = found;
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
+  if (isServerOnline(s.id)) return res.json({ ok: true, status: "online", alreadyRunning: true });
+  try {
+    runServer(s);
+    res.json({ ok: true, status: "online" });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/stop", apiKeyAuth, requireScope("servers:stop"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  try {
+    await stopServer(found.server.id);
+    res.json({ ok: true, status: "offline" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/restart", apiKeyAuth, requireScope("servers:restart"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
+  try {
+    if (isServerOnline(s.id)) await stopServer(s.id);
+    runServer(s);
+    res.json({ ok: true, status: "online" });
+  } catch (e) {
+    broadcastServer(s.id, { type: "log", data: `\n[api restart error] ${e.message}\n` });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/suspend", apiKeyAuth, requireScope("servers:suspend"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  try {
+    if (isServerOnline(s.id)) await stopServer(s.id);
+    s.suspended = true;
+    s.suspendedAt = new Date().toISOString();
+    s.suspendedReason = String(req.body.reason || "Suspended by API").slice(0, 200);
+    await writeJson(SERVERS_FILE, found.servers);
+    res.json({ ok: true, status: "offline", suspended: true, reason: s.suspendedReason });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/unsuspend", apiKeyAuth, requireScope("servers:unsuspend"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  s.suspended = false;
+  s.suspendedAt = null;
+  s.suspendedReason = null;
+  await writeJson(SERVERS_FILE, found.servers);
+  res.json({ ok: true, status: isServerOnline(s.id) ? "online" : "offline", suspended: false });
+});
+
+app.get("/api/access/servers/:id/stats", apiKeyAuth, requireScope("servers:stats"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  const p = processes.get(s.id);
+  const disk = await directorySize(serverRoot(s.id));
+  const proc = p ? readProcessStats(p.child.pid) : null;
+  res.json({
+    id: s.id,
+    status: p ? "online" : "offline",
+    suspended: Boolean(s.suspended),
+    uptime: p ? Math.floor((Date.now() - p.startedAt) / 1000) : 0,
+    memory: proc?.memory || 0,
+    memoryLimit: Number(s.memoryLimit || 512) * 1024 * 1024,
+    cpu: proc ? Number(proc.cpu.toFixed(1)) : 0,
+    storage: disk
+  });
+});
+
+app.delete("/api/access/servers/:id", apiKeyAuth, requireScope("servers:delete"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const { servers, server: s } = found;
+  const users = await getAllUsersForApi();
+  const protectedId = protectedRootServerId(servers, users);
+
+  if (s.id === protectedId) {
+    return res.status(403).json({
+      error: "Server ROOT/ADMIN pertama dilindungi dan tidak boleh dihapus melalui API"
+    });
+  }
+
+  // API deletion is intentionally offline-only.
+  if (isServerOnline(s.id)) {
+    return res.status(409).json({
+      error: "Server masih online. Stop server terlebih dahulu sebelum delete."
+    });
+  }
+
+  await writeJson(SERVERS_FILE, servers.filter(x => x.id !== s.id));
+  await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
+
+  res.json({ ok: true, deleted: s.id });
+});
+
+app.get("/api/access/overview", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const protectedId = protectedRootServerId(servers, users);
+  const online = servers.filter(s => isServerOnline(s.id)).length;
+  const suspended = servers.filter(s => Boolean(s.suspended)).length;
+
+  res.json({
+    users: users.length,
+    servers: servers.length,
+    onlineServers: online,
+    offlineServers: servers.length - online,
+    suspendedServers: suspended,
+    protectedRootServerId: protectedId
+  });
 });
 
 app.get("/api/servers", auth, async (req, res) => {
@@ -628,6 +1031,7 @@ app.delete("/api/servers/:id", auth, async (req, res) => {
 app.post("/api/servers/:id/start", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
   try { runServer(s); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -646,6 +1050,7 @@ app.post("/api/servers/:id/stop", auth, async (req, res) => {
 app.post("/api/servers/:id/restart", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
   try {
     await stopServer(s.id);
     runServer(s);
