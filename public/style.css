@@ -90,3 +90,113 @@ aside .mobile-create:active{transform:translateY(0)}
 
 /* File manager additions — keeps the existing FRANXX theme intact. */
 .filebar{flex-wrap:wrap}.file-path{flex:1 1 240px;min-width:180px;display:flex;align-items:center;gap:5px;overflow:auto;scrollbar-width:thin}.file-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.file-path button{border:0;background:transparent;color:#8f98a8;padding:5px 4px;font:inherit;font-size:10px;letter-spacing:.08em;cursor:pointer;white-space:nowrap}.file-path .path-root{color:#e7ebf2;font-weight:800}.file-path .path-part:hover,.file-path .path-root:hover{color:#fff}.path-sep{color:#4e5664;font-size:11px}.filebar .selected-indicator{margin-left:auto}.file-action{padding:7px 9px;font-size:9px;flex:0 0 auto}.file-up{cursor:pointer}.file-up:hover{background:#11151c}.file-up small{color:#555e6c;font-size:8px;letter-spacing:.1em;margin-left:6px}@media(max-width:800px){.file-path{flex-basis:100%;min-width:0}.file-actions{width:100%}.file-actions button{flex:1;min-width:90px}.filebar .selected-indicator{margin-left:0}.file-action{padding:6px 8px}}@media(max-width:430px){.file-actions button{min-width:0;font-size:9px}.file .file-action{padding:6px}.file-up small{display:none}}
+
+/* =========================================================
+   FRANXX PTERO — RESPONSIVE UI FIX
+   Only layout/responsive presentation is adjusted here.
+   Existing theme, colors, components and functionality stay intact.
+   ========================================================= */
+
+/* Desktop: let the workspace use the complete available width. */
+.layout{align-items:stretch}
+.layout>main{min-width:0;max-width:none}
+#serverDetail,#dashboard,#servers{width:100%;min-width:0}
+.tabpage,.detail-banner,.server-tabs,.filebar,.filelist,.editorbar,.editor{max-width:none;width:100%}
+.server-top{min-width:0}
+.server-top>div:first-child{min-width:0}
+.server-top h1{overflow-wrap:anywhere}
+
+/* Keep the file toolbar readable instead of allowing buttons to collide. */
+.filebar{align-items:flex-start}
+.file-path{min-height:38px;padding:4px 7px;border:1px solid #202530;border-radius:9px;background:#0a0c10;flex:1 1 220px}
+.file-actions{flex:1 1 auto;justify-content:flex-end;min-width:0}
+.file-actions button{white-space:nowrap}
+.selected-indicator{white-space:nowrap;padding:11px 2px}
+
+/* File rows stay compact on wide screens. */
+.file{min-width:0}
+.file .name{overflow-wrap:anywhere}
+.file .file-action{display:inline-flex;align-items:center;justify-content:center}
+
+@media (min-width:1200px){
+  main{padding-left:36px;padding-right:36px}
+  .file-actions{gap:8px}
+  .file-actions .ghost,.file-actions .danger,.file-actions .primary{padding-left:12px;padding-right:12px}
+}
+
+@media (max-width:800px){
+  /* Mobile header remains compact and never pushes content sideways. */
+  header{width:100%;min-width:0}
+  .header-brand{min-width:0}
+  .header-brand span{min-width:0}
+  .header-brand b,.header-brand small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .header-right{gap:6px;min-width:0}
+  .header-right .account{display:none}
+  .header-right .ghost{padding:10px 12px}
+
+  main{width:100%;min-width:0;overflow:visible}
+  .server-top{align-items:flex-start;flex-direction:column;gap:14px}
+  .server-top .actions{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .server-top .actions button{min-width:0;width:100%;padding:10px 8px}
+  .detail-banner{margin-bottom:10px}
+  .server-tabs{overflow-x:auto;scrollbar-width:none;white-space:nowrap}
+  .server-tabs::-webkit-scrollbar{display:none}
+  .stab{flex:0 0 auto}
+
+  /* File toolbar becomes a real mobile control panel. */
+  .filebar{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:9px}
+  .file-path{width:100%;min-width:0;flex:none;overflow-x:auto;white-space:nowrap}
+  .file-actions{width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;min-width:0}
+  .file-actions button{width:100%;min-width:0;min-height:40px;padding:9px 7px;font-size:9px}
+  .filebar .selected-indicator{width:100%;padding:4px 2px 1px;margin:0;order:initial}
+
+  .filelist{border-radius:12px}
+  .file{display:grid;grid-template-columns:20px 28px minmax(0,1fr) auto;gap:9px;padding:12px 10px}
+  .file .name{grid-column:3;grid-row:1;align-self:center}
+  .file .size{grid-column:4;grid-row:1;font-size:9px}
+  .file .file-action{grid-column:3 / 5;grid-row:2;width:100%;min-height:34px}
+  .file .file-action + .file-action{grid-column:auto}
+  .file-up{display:flex;align-items:center;gap:10px}
+  .file-up .name{display:block}
+  .file-check{width:18px;height:18px}
+  .file-icon{width:28px}
+
+  .resource-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .resource-card{min-width:0;overflow:hidden}
+  .resource-label b{max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .runtime-head{gap:8px}
+  .runtime-head>div{min-width:0}
+  .runtime-head b{font-size:11px}
+  .runtime-head small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
+
+@media (max-width:520px){
+  main{padding-left:10px;padding-right:10px}
+  .top-banner{height:140px}
+  .banner-content{left:16px}
+  .banner-content b{font-size:21px}
+  .hero-new{padding:18px 16px}
+  .hero-new h1{font-size:29px}
+  .hero-new p{font-size:11px}
+  .cards-new .stat-card{min-height:118px}
+  .section-head{gap:10px}
+  .section-head .refresh-btn{flex:0 0 auto}
+  .server-top h1{font-size:27px}
+  .server-top .actions button{font-size:10px}
+  .detail-banner{height:78px}
+  .file-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+@media (max-width:380px){
+  header{padding-left:9px;padding-right:9px}
+  header .header-brand{gap:6px;margin-left:7px}
+  header .header-brand .header-logo{width:29px;height:29px}
+  header .header-brand b{font-size:10px}
+  header .header-brand small{font-size:5px}
+  .header-right .ghost{padding:9px 10px;font-size:10px}
+  .cards-new{grid-template-columns:1fr}
+  .cards-new .stat-card:last-child{grid-column:auto}
+  .resource-grid{grid-template-columns:1fr}
+  .server-top .actions{grid-template-columns:1fr}
+  .file-actions{grid-template-columns:1fr}
+}
