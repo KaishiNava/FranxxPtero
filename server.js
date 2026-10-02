@@ -21,9 +21,98 @@ const SERVERS_FILE = path.join(DATA, "servers.json");
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex");
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 100);
 
+// Account + access-key database. When GitHub is configured, these JSON files
+// are the source of truth; local files remain as a safe development fallback.
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || "";
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+const GITHUB_USERS_PATH = process.env.GITHUB_USERS_PATH || "database/users.json";
+const GITHUB_KEYS_PATH = process.env.GITHUB_KEYS_PATH || "database/access-keys.json";
+const ROOT_USERNAME = String(process.env.ROOT_USERNAME || "admin").trim().toLowerCase();
+const ROOT_PASSWORD = String(process.env.ROOT_PASSWORD || "");
+const GITHUB_ENABLED = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+
+function githubHeaders() {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json"
+  };
+}
+function githubApiUrl(filePath) {
+  return `https://api.github.com/repos/${encodeURIComponent(GITHUB_OWNER)}/${encodeURIComponent(GITHUB_REPO)}/contents/${filePath.split("/").map(encodeURIComponent).join("/")}`;
+}
+function decodeGithub(content) {
+  return JSON.parse(Buffer.from(String(content || "").replace(/\n/g, ""), "base64").toString("utf8"));
+}
+async function githubReadJson(filePath, fallback = []) {
+  if (!GITHUB_ENABLED) return fallback;
+  const r = await fetch(`${githubApiUrl(filePath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { headers: githubHeaders() });
+  if (r.status === 404) return fallback;
+  if (!r.ok) throw new Error(`GitHub database read failed (${r.status})`);
+  const d = await r.json();
+  return decodeGithub(d.content);
+}
+async function githubWriteJson(filePath, data, message) {
+  if (!GITHUB_ENABLED) return;
+  let sha;
+  const existing = await fetch(`${githubApiUrl(filePath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { headers: githubHeaders() });
+  if (existing.ok) sha = (await existing.json()).sha;
+  else if (existing.status !== 404) throw new Error(`GitHub database lookup failed (${existing.status})`);
+  const body = {
+    message,
+    content: Buffer.from(JSON.stringify(data, null, 2) + "\n", "utf8").toString("base64"),
+    branch: GITHUB_BRANCH
+  };
+  if (sha) body.sha = sha;
+  const r = await fetch(githubApiUrl(filePath), { method: "PUT", headers: githubHeaders(), body: JSON.stringify(body) });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.message || `GitHub database write failed (${r.status})`);
+  }
+}
+async function readUsers() {
+  if (GITHUB_ENABLED) return githubReadJson(GITHUB_USERS_PATH, []);
+  return readJson(USERS_FILE);
+}
+async function writeUsers(users, message = "Update users database") {
+  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_USERS_PATH, users, message);
+  return writeJson(USERS_FILE, users);
+}
+async function readAccessKeys() {
+  if (GITHUB_ENABLED) return githubReadJson(GITHUB_KEYS_PATH, []);
+  const f = path.join(DATA, "access-keys.json");
+  if (!fs.existsSync(f)) await writeJson(f, []);
+  return readJson(f);
+}
+async function writeAccessKeys(keys, message = "Update access keys database") {
+  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, keys, message);
+  const f = path.join(DATA, "access-keys.json");
+  return writeJson(f, keys);
+}
+async function findUserById(userId) {
+  const users = await readUsers();
+  return users.find(u => u.id === userId) || null;
+}
+async function ensureRootAccount() {
+  const users = await readUsers();
+  if (users.length) return users;
+  if (!ROOT_PASSWORD) {
+    if (GITHUB_ENABLED) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
+    return users;
+  }
+  const root = { id: id("usr"), username: ROOT_USERNAME || "admin", password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
+  await writeUsers([root], "Create initial root account");
+  return [root];
+}
+
 for (const p of [DATA, SERVERS_DIR]) fs.mkdirSync(p, { recursive: true });
 if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, "[]");
 if (!fs.existsSync(SERVERS_FILE)) fs.writeFileSync(SERVERS_FILE, "[]");
+const ACCESS_KEYS_FILE = path.join(DATA, "access-keys.json");
+if (!fs.existsSync(ACCESS_KEYS_FILE)) fs.writeFileSync(ACCESS_KEYS_FILE, "[]");
 
 const app = express();
 const server = http.createServer(app);
@@ -277,47 +366,151 @@ function stopServer(serverId) {
 }
 
 app.post("/api/auth/register", async (req, res) => {
-  const username = String(req.body.username || "").trim().toLowerCase();
-  const password = String(req.body.password || "");
-  if (!/^[a-z0-9_]{3,24}$/.test(username))
-    return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
-  if (password.length < 6) return res.status(400).json({ error: "Password minimal 6 karakter" });
-
-  const users = await readJson(USERS_FILE);
-  if (users.some(u => u.username === username))
-    return res.status(409).json({ error: "Username sudah digunakan" });
-
-  const user = {
-    id: id("usr"),
-    username,
-    passwordHash: await bcrypt.hash(password, 12),
-    createdAt: new Date().toISOString()
-  };
-  users.push(user);
-  await writeJson(USERS_FILE, users);
-  const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: "30d" });
-  res.json({ token, user: { id: user.id, username } });
+  return res.status(403).json({ error: "Register publik dinonaktifkan. Hanya akun root/admin yang dapat membuat user baru." });
 });
 
 app.post("/api/auth/login", async (req, res) => {
   const username = String(req.body.username || "").trim().toLowerCase();
   const password = String(req.body.password || "");
-  const users = await readJson(USERS_FILE);
-  const user = users.find(u => u.username === username);
-  if (!user || !(await bcrypt.compare(password, user.passwordHash)))
-    return res.status(401).json({ error: "Username atau password salah" });
-  const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: "30d" });
-  res.json({ token, user: { id: user.id, username } });
+  try {
+    const users = await ensureRootAccount();
+    const user = users.find(u => u.username === username);
+    if (!user || !(await bcrypt.compare(password, user.password || user.passwordHash || "")))
+      return res.status(401).json({ error: "Username atau password salah" });
+    const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: "30d" });
+    res.json({ token, user: { id: user.id, username, root: Boolean(user.root) } });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Database akun tidak tersedia" });
+  }
 });
 
-app.get("/api/me", auth, (req, res) => res.json({ id: req.user.id, username: req.user.username }));
+app.get("/api/me", auth, async (req, res) => {
+  const user = await findUserById(req.user.id);
+  if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
+  res.json({ id: user.id, username: user.username, root: Boolean(user.root), createdAt: user.createdAt });
+});
+
+function rootAuth(req, res, next) {
+  findUserById(req.user.id).then(user => {
+    if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
+    if (!user.root) return res.status(403).json({ error: "Akses root/admin diperlukan" });
+    req.account = user;
+    next();
+  }).catch(e => res.status(500).json({ error: e.message }));
+}
+
+function normalizeScopes(scopes) {
+  const allowed = new Set(["users:create", "servers:create"]);
+  return [...new Set((Array.isArray(scopes) ? scopes : []).map(String).filter(x => allowed.has(x)))];
+}
+function hashAccessKey(secret) {
+  return crypto.createHash("sha256").update(secret).digest("hex");
+}
+function apiKeyAuth(req, res, next) {
+  (async () => {
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ error: "Access key diperlukan" });
+    const secret = h.slice(7).trim();
+    if (!secret.startsWith("fx_live_")) return res.status(401).json({ error: "Access key tidak valid" });
+    const keys = await readAccessKeys();
+    const hash = hashAccessKey(secret);
+    const key = keys.find(k => {
+      if (k.revokedAt || typeof k.keyHash !== "string" || k.keyHash.length !== hash.length) return false;
+      return crypto.timingSafeEqual(Buffer.from(k.keyHash), Buffer.from(hash));
+    });
+    if (!key) return res.status(401).json({ error: "Access key tidak valid atau sudah direvoke" });
+    req.apiKey = key;
+    next();
+  })().catch(e => res.status(500).json({ error: e.message || "Access key database error" }));
+}
+function requireScope(scope) {
+  return (req, res, next) => {
+    if (!req.apiKey || !req.apiKey.scopes.includes(scope)) return res.status(403).json({ error: `Scope ${scope} diperlukan` });
+    next();
+  };
+}
+
+app.get("/api/root/profile", auth, rootAuth, async (req, res) => {
+  const users = await readUsers();
+  res.json({ account: { id: req.account.id, username: req.account.username, root: true, createdAt: req.account.createdAt }, users: users.map(u => ({ id: u.id, username: u.username, root: Boolean(u.root), createdAt: u.createdAt })) });
+});
+
+app.post("/api/root/users", auth, rootAuth, async (req, res) => {
+  const username = String(req.body.username || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  const root = Boolean(req.body.root);
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
+  if (password.length < 6) return res.status(400).json({ error: "Password minimal 6 karakter" });
+  const users = await readUsers();
+  if (users.some(u => u.username === username)) return res.status(409).json({ error: "Username sudah digunakan" });
+  const user = { id: id("usr"), username, password: await bcrypt.hash(password, 12), root, createdAt: new Date().toISOString() };
+  users.push(user);
+  await writeUsers(users, `Create user ${username}`);
+  res.json({ id: user.id, username: user.username, root: user.root, createdAt: user.createdAt });
+});
+
+app.get("/api/root/access-keys", auth, rootAuth, async (req, res) => {
+  const keys = await readAccessKeys();
+  res.json(keys.map(k => ({ id: k.id, name: k.name, prefix: k.prefix, ownerId: k.ownerId, scopes: k.scopes, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt || null, revokedAt: k.revokedAt || null })));
+});
+
+app.post("/api/root/access-keys", auth, rootAuth, async (req, res) => {
+  const name = String(req.body.name || "API Key").trim().slice(0, 60) || "API Key";
+  const scopes = normalizeScopes(req.body.scopes);
+  if (!scopes.length) return res.status(400).json({ error: "Pilih minimal satu permission" });
+  const secret = `fx_live_${crypto.randomBytes(32).toString("hex")}`;
+  const keys = await readAccessKeys();
+  const key = { id: id("key"), name, prefix: secret.slice(0, 16), keyHash: hashAccessKey(secret), ownerId: req.account.id, scopes, createdAt: new Date().toISOString(), revokedAt: null, lastUsedAt: null };
+  keys.push(key);
+  await writeAccessKeys(keys, `Create access key ${name}`);
+  // The raw secret is intentionally returned only once. It is never stored in the database.
+  res.json({ id: key.id, name: key.name, secret, prefix: key.prefix, scopes: key.scopes, createdAt: key.createdAt });
+});
+
+app.post("/api/root/access-keys/:id/revoke", auth, rootAuth, async (req, res) => {
+  const keys = await readAccessKeys();
+  const key = keys.find(k => k.id === req.params.id);
+  if (!key) return res.status(404).json({ error: "Access key tidak ditemukan" });
+  key.revokedAt = new Date().toISOString();
+  await writeAccessKeys(keys, `Revoke access key ${key.name}`);
+  res.json({ ok: true });
+});
+
+app.post("/api/access/users", apiKeyAuth, requireScope("users:create"), async (req, res) => {
+  const username = String(req.body.username || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  const root = Boolean(req.body.root);
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
+  if (password.length < 6) return res.status(400).json({ error: "Password minimal 6 karakter" });
+  // API keys may create normal users only; root elevation remains a root-panel action.
+  if (root) return res.status(403).json({ error: "API key tidak boleh membuat akun root" });
+  const users = await readUsers();
+  if (users.some(u => u.username === username)) return res.status(409).json({ error: "Username sudah digunakan" });
+  const user = { id: id("usr"), username, password: await bcrypt.hash(password, 12), root: false, createdAt: new Date().toISOString() };
+  users.push(user);
+  await writeUsers(users, `API create user ${username}`);
+  res.json({ id: user.id, username: user.username, root: false, createdAt: user.createdAt });
+});
 
 app.get("/api/servers", auth, async (req, res) => {
   const servers = await readJson(SERVERS_FILE);
   res.json(servers.filter(s => s.ownerId === req.user.id).map(publicServer));
 });
 
-app.post("/api/servers", auth, async (req, res) => {
+app.post("/api/servers", async (req, res, next) => {
+  const bearer = req.headers.authorization || "";
+  try {
+    if (bearer.startsWith("Bearer fx_live_")) return apiKeyAuth(req, res, () => requireScope("servers:create")(req, res, next));
+    return auth(req, res, next);
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+}, async (req, res) => {
+  let ownerId = req.user?.id;
+  if (req.apiKey) {
+    ownerId = String(req.body.userId || "").trim();
+    if (!ownerId) return res.status(400).json({ error: "userId wajib diisi saat memakai access key" });
+    const target = await findUserById(ownerId);
+    if (!target) return res.status(404).json({ error: "User tujuan tidak ditemukan" });
+  }
   const name = safeName(req.body.name || "My Server");
   const runtime = ["node", "python", "custom"].includes(req.body.runtime) ? req.body.runtime : "node";
   const entry = safeName(req.body.entry || (runtime === "python" ? "main.py" : "index.js"));
@@ -327,7 +520,7 @@ app.post("/api/servers", auth, async (req, res) => {
 
   const servers = await readJson(SERVERS_FILE);
   const s = {
-    id: id("srv"), ownerId: req.user.id, name, runtime, entry, command,
+    id: id("srv"), ownerId, name, runtime, entry, command,
     memoryLimit, env: {}, createdAt: new Date().toISOString()
   };
   servers.push(s);
