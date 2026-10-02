@@ -1,3 +1,9 @@
-{
-  "users": []
-}
+[
+  {
+    "id": "usr_6c88d54fd36baf",
+    "username": "admin",
+    "password": "$2a$12$uDtoLUEBixX615aDMZsiu.AShwtEW.h/84svAzjW.n1rdF8BkjKqi",
+    "root": true,
+    "createdAt": "2026-10-02T13:02:55.491Z"
+  }
+]
