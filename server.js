@@ -199,7 +199,8 @@ function runServer(s) {
     cwd,
     env: { ...process.env, ...(s.env || {}), FX_SERVER_ID: s.id },
     shell: true,
-    windowsHide: true
+    windowsHide: true,
+    detached: process.platform !== "win32"
   });
 
   const state = {
@@ -227,17 +228,52 @@ function runServer(s) {
 
 function stopServer(serverId) {
   const p = processes.get(serverId);
-  if (!p) return false;
-  try {
-    if (process.platform === "win32") p.child.kill();
-    else {
-      p.child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!p.child.killed) try { p.child.kill("SIGKILL"); } catch {}
-      }, 5000);
+  if (!p) return Promise.resolve(false);
+  if (p.stopPromise) return p.stopPromise;
+
+  p.stopPromise = new Promise((resolve, reject) => {
+    const child = p.child;
+    let finished = false;
+    let timer;
+
+    const finish = ok => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      if (processes.get(serverId) === p) processes.delete(serverId);
+      ok ? resolve(true) : reject(new Error("Process tidak berhenti dalam waktu yang ditentukan"));
+    };
+
+    const forceStop = () => {
+      try {
+        if (process.platform === "win32") child.kill();
+        else process.kill(-child.pid, "SIGKILL");
+      } catch {}
+    };
+
+    child.once("close", () => finish(true));
+    child.once("error", () => finish(true));
+
+    try {
+      // The runtime is spawned as a detached process group on Unix. Killing
+      // the negative PID terminates the shell and the actual runtime child
+      // together, preventing restart from colliding with an old process.
+      if (process.platform === "win32") {
+        child.kill();
+      } else {
+        process.kill(-child.pid, "SIGTERM");
+      }
+    } catch {
+      try { child.kill("SIGTERM"); } catch {}
     }
-  } catch {}
-  return true;
+
+    timer = setTimeout(() => {
+      forceStop();
+      setTimeout(() => finish(false), 1200);
+    }, 5000);
+  });
+
+  return p.stopPromise;
 }
 
 app.post("/api/auth/register", async (req, res) => {
@@ -303,7 +339,7 @@ app.post("/api/servers", auth, async (req, res) => {
 app.delete("/api/servers/:id", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  stopServer(s.id);
+  await stopServer(s.id);
   const servers = await readJson(SERVERS_FILE);
   await writeJson(SERVERS_FILE, servers.filter(x => x.id !== s.id));
   await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
@@ -320,16 +356,25 @@ app.post("/api/servers/:id/start", auth, async (req, res) => {
 app.post("/api/servers/:id/stop", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  stopServer(s.id);
-  res.json({ ok: true });
+  try {
+    await stopServer(s.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/servers/:id/restart", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  stopServer(s.id);
-  setTimeout(() => { try { runServer(s); } catch (e) { broadcastServer(s.id, { type: "log", data: `\n[restart error] ${e.message}\n` }); } }, 700);
-  res.json({ ok: true });
+  try {
+    await stopServer(s.id);
+    runServer(s);
+    res.json({ ok: true });
+  } catch (e) {
+    broadcastServer(s.id, { type: "log", data: `\n[restart error] ${e.message}\n` });
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get("/api/servers/:id/files", auth, async (req, res) => {
