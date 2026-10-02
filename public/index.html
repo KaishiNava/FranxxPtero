@@ -65,10 +65,17 @@
     </div>
     <div class="console" id="console"><div class="console-welcome">FRANXX RUNTIME<br><span>Waiting for process...</span></div></div>
     <div class="console-input"><span>›</span><input id="stdin" placeholder="Console input (Enter untuk kirim)" autocomplete="off"></div>
+    <div class="resource-head"><div><b>LIVE USAGE</b><small>REAL-TIME RUNTIME MONITOR</small></div><span class="resource-live"><i></i> LIVE</span></div>
+    <div class="resource-grid">
+      <div class="resource-card"><div class="resource-label"><span>RAM</span><b id="ramValue">0 B / 512 MB</b></div><div class="resource-bar"><i id="ramBar"></i></div><div class="resource-foot"><span>Allocated</span><b id="ramPct">0%</b></div></div>
+      <div class="resource-card"><div class="resource-label"><span>CPU</span><b id="cpuValue">0.0%</b></div><div class="resource-bar"><i id="cpuBar"></i></div><div class="resource-foot"><span>Process usage</span><b>LIVE</b></div></div>
+      <div class="resource-card"><div class="resource-label"><span>STORAGE</span><b id="storageValue">0 B</b></div><div class="resource-bar"><i id="storageBar"></i></div><div class="resource-foot"><span>Server files</span><b>LIVE</b></div></div>
+      <div class="resource-card"><div class="resource-label"><span>UPTIME</span><b id="uptimeValue">OFFLINE</b></div><div class="resource-foot resource-alone"><span>Runtime session</span><b>LIVE</b></div></div>
+    </div>
   </div>
-  <div id="filesTab" class="tabpage hidden"><div class="filebar"><span id="cwd">/</span><button class="ghost" onclick="uploadFiles()">UPLOAD</button><button class="ghost" onclick="newFolder()">NEW FOLDER</button><input type="file" id="fileInput" multiple hidden></div><div id="files" class="filelist"></div></div>
+  <div id="filesTab" class="tabpage hidden"><div class="filebar"><span id="cwd">/</span><button class="ghost" onclick="uploadFiles()">UPLOAD</button><button class="ghost" onclick="newFolder()">NEW FOLDER</button><button class="ghost" onclick="selectAllFiles()">SELECT ALL</button><button class="ghost" onclick="clearSelection()">CLEAR</button><span class="selected-indicator"><b id="selectedCount">0</b> selected</span><button class="danger" id="deleteSelected" onclick="deleteSelected()" disabled>DELETE</button><button class="ghost" id="zipSelected" onclick="zipSelected()" disabled>MAKE ZIP</button><button class="primary" id="downloadSelected" onclick="downloadZip()" disabled>DOWNLOAD ZIP</button><input type="file" id="fileInput" multiple hidden></div><div id="files" class="filelist"></div></div>
   <div id="editorTab" class="tabpage hidden"><div class="editorbar"><span id="editing">No file selected</span><button class="primary" onclick="saveFile()">SAVE</button></div><textarea id="editor" spellcheck="false"></textarea></div>
-  <div id="settingsTab" class="tabpage hidden"><div class="settings"><label>COMMAND</label><input id="commandInput"><label>ENTRY FILE</label><input id="entryInput"><button class="primary" onclick="saveSettings()">SAVE SETTINGS</button><hr><button class="danger" onclick="deleteServer()">DELETE SERVER</button></div></div>
+  <div id="settingsTab" class="tabpage hidden"><div class="settings"><label>COMMAND</label><input id="commandInput"><label>ENTRY FILE</label><input id="entryInput"><label>RAM ALLOCATION (MB)</label><input id="memoryInput" type="number" min="64" max="32768" step="64"><small class="settings-note">Dipakai sebagai batas/alokasi monitor RAM server. Nilai aktual mengikuti runtime host.</small><button class="primary" onclick="saveSettings()">SAVE SETTINGS</button><hr><button class="danger" onclick="deleteServer()">DELETE SERVER</button></div></div>
 </div>
 </main>
 </div>
@@ -80,6 +87,9 @@
 <select id="newRuntime"><option value="node">Node.js</option><option value="python">Python</option><option value="custom">Custom</option></select>
 <input id="newEntry" placeholder="Entry file" value="index.js">
 <input id="newCommand" placeholder="Start command" value="node index.js">
+<label class="modal-label">RAM ALLOCATION</label>
+<div class="ram-input-row"><input id="newMemory" type="number" min="64" max="32768" step="64" value="512" placeholder="512"><span>MB</span></div>
+<div class="preset-row"><button type="button" class="ghost" onclick="$("#newMemory").value=256">256 MB</button><button type="button" class="ghost" onclick="$("#newMemory").value=512">512 MB</button><button type="button" class="ghost" onclick="$("#newMemory").value=1024">1 GB</button><button type="button" class="ghost" onclick="$("#newMemory").value=2048">2 GB</button></div>
 <button class="primary wide" onclick="createServer()">CREATE</button></div></div>
 <script src="/app.js"></script>
 </body>
