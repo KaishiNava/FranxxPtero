@@ -9,6 +9,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { spawn } = require("child_process");
+const os = require("os");
+const AdmZip = require("adm-zip");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
@@ -92,9 +94,54 @@ async function getOwnedServer(userId, serverId) {
 function publicServer(s) {
   return {
     id: s.id, name: s.name, runtime: s.runtime, entry: s.entry,
-    command: s.command, createdAt: s.createdAt,
+    command: s.command, memoryLimit: Number(s.memoryLimit || 512),
+    createdAt: s.createdAt,
     status: processes.has(s.id) ? "online" : "offline"
   };
+}
+
+function parseMemoryMB(value, fallback = 512) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(64, Math.min(32768, Math.round(n)));
+}
+
+async function directorySize(dir) {
+  let total = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = await fsp.readdir(current, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const p = path.join(current, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else { try { total += (await fsp.stat(p)).size; } catch {} }
+    }
+  }
+  return total;
+}
+
+function readProcessStats(pid) {
+  if (!pid || process.platform !== "linux") return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8").trim();
+    const endComm = stat.lastIndexOf(")");
+    const fields = stat.slice(endComm + 2).split(/\s+/);
+    const utime = Number(fields[11] || 0);
+    const stime = Number(fields[12] || 0);
+    const hz = 100;
+    const totalCpu = (utime + stime) / hz;
+    const uptime = Number(fs.readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+    const startTicks = Number(fields[19] || 0);
+    const startSec = startTicks / hz;
+    const age = Math.max(0.1, uptime - startSec);
+    const cpu = Math.min(100, Math.max(0, (totalCpu / age) * 100));
+    const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+    const match = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
+    const memory = match ? Number(match[1]) * 1024 : 0;
+    return { cpu, memory };
+  } catch { return null; }
 }
 function sendWs(ws, payload) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -145,7 +192,11 @@ function runServer(s) {
     windowsHide: true
   });
 
-  const state = { child, startedAt: Date.now(), buffer: "" };
+  const state = {
+    child, startedAt: Date.now(), buffer: "",
+    cpuStart: process.cpuUsage(), wallStart: Date.now(),
+    memoryLimit: Number(s.memoryLimit || 512)
+  };
   processes.set(s.id, state);
   broadcastServer(s.id, { type: "status", status: "online" });
 
@@ -226,11 +277,12 @@ app.post("/api/servers", auth, async (req, res) => {
   const entry = safeName(req.body.entry || (runtime === "python" ? "main.py" : "index.js"));
   const command = String(req.body.command || (runtime === "python" ? "python main.py" : "node index.js")).trim();
   if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
+  const memoryLimit = parseMemoryMB(req.body.memoryLimit, 512);
 
   const servers = await readJson(SERVERS_FILE);
   const s = {
     id: id("srv"), ownerId: req.user.id, name, runtime, entry, command,
-    env: {}, createdAt: new Date().toISOString()
+    memoryLimit, env: {}, createdAt: new Date().toISOString()
   };
   servers.push(s);
   await writeJson(SERVERS_FILE, servers);
@@ -339,9 +391,11 @@ app.put("/api/servers/:id/settings", auth, async (req, res) => {
   if (!s) return res.status(404).json({error:"Server tidak ditemukan"});
   const command = String(req.body.command || "").trim();
   const entry = safeName(req.body.entry || s.entry);
+  const memoryLimit = parseMemoryMB(req.body.memoryLimit, s.memoryLimit || 512);
   if (!command || command.length > 300) return res.status(400).json({error:"Command tidak valid"});
   s.command = command;
   s.entry = entry;
+  s.memoryLimit = memoryLimit;
   await writeJson(SERVERS_FILE, servers);
   res.json({ok:true});
 });
@@ -372,16 +426,54 @@ app.post("/api/servers/:id/unzip", auth, async (req, res) => {
   }
 });
 
+app.post("/api/servers/:id/archive", auth, async (req, res) => {
+  const s = await getOwnedServer(req.user.id, req.params.id);
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  try {
+    const paths = Array.isArray(req.body.paths) ? req.body.paths : [];
+    if (!paths.length) return res.status(400).json({ error: "Tidak ada file yang dipilih" });
+    const root = path.resolve(serverRoot(s.id));
+    const zip = new AdmZip();
+    const used = new Set();
+    for (const rel of paths.slice(0, 500)) {
+      const clean = String(rel || "").replace(/^\/+/, "");
+      if (!clean || clean === ".") continue;
+      const source = safeServerPath(req.user.id, s.id, clean);
+      const relative = path.relative(root, source);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Invalid path");
+      const stat = await fsp.stat(source);
+      if (stat.isDirectory()) zip.addLocalFolder(source, relative);
+      else zip.addLocalFile(source, undefined, relative);
+      used.add(relative);
+    }
+    if (!used.size) return res.status(400).json({ error: "Tidak ada file yang dipilih" });
+    const name = `fx-${safeName(s.name)}-${Date.now()}.zip`;
+    const tmpDir = path.join(DATA, "tmp");
+    await fsp.mkdir(tmpDir, { recursive: true });
+    const out = path.join(tmpDir, `${id("zip")}.zip`);
+    zip.writeZip(out);
+    res.download(out, name, async () => { try { await fsp.rm(out, { force: true }); } catch {} });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get("/api/servers/:id/stats", auth, async (req,res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({error:"Server tidak ditemukan"});
   const p = processes.get(s.id);
+  const disk = await directorySize(serverRoot(s.id));
+  const proc = p ? readProcessStats(p.child.pid) : null;
+  const memory = proc?.memory || 0;
   res.json({
     status: p ? "online" : "offline",
     uptime: p ? Math.floor((Date.now()-p.startedAt)/1000) : 0,
-    memory: process.memoryUsage().rss,
+    memory,
+    memoryLimit: Number(s.memoryLimit || 512) * 1024 * 1024,
+    cpu: proc ? Number(proc.cpu.toFixed(1)) : 0,
+    storage: disk,
     platform: process.platform,
-    node: process.version
+    node: process.version,
+    hostMemory: os.totalmem(),
+    hostFreeMemory: os.freemem()
   });
 });
 
