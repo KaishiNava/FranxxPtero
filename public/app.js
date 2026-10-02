@@ -10,15 +10,47 @@ function esc(x){return String(x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 async function loadServers(){try{servers=await api("/api/servers");$("#serverCount").textContent=servers.length;$("#onlineCount").textContent=servers.filter(s=>s.status==="online").length;$("#serverGrid").innerHTML=servers.length?servers.map(card).join(""):`<div class="card">Belum ada server.</div>`;$("#recent").innerHTML=servers.slice(0,4).map(card).join("")||`<div class="card">Belum ada server.</div>`}catch(e){toast(e.message,true)}}
 async function createServer(){try{const s=await api("/api/servers",{method:"POST",body:{name:$("#newName").value,runtime:$("#newRuntime").value,entry:$("#newEntry").value,command:$("#newCommand").value}});closeModal();toast("Server dibuat");$("#newName").value="";await loadServers();openServer(s.id)}catch(e){toast(e.message,true)}}
 async function openServer(id){current=servers.find(x=>x.id===id)||await api("/api/servers").then(a=>a.find(x=>x.id===id));if(!current)return;$("#detailName").textContent=current.name;$("#detailRuntime").textContent=current.runtime.toUpperCase();$("#detailStatus").textContent=current.status.toUpperCase();$("#detailStatus").className="status "+current.status;$("#commandInput").value=current.command;$("#entryInput").value=current.entry;$("#console").textContent="";showPage("serverDetail");connectWS();loadFiles()}
-function connectWS(){if(ws)try{ws.close()}catch{};ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws?token=${encodeURIComponent(token)}&server=${current.id}`);ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==="log"){const c=$("#console");c.textContent+=d.data;c.scrollTop=c.scrollHeight}else if(d.type==="status"){current.status=d.status;$("#detailStatus").textContent=d.status.toUpperCase();$("#detailStatus").className="status "+d.status}}}
+let statsTimer=null;
+function connectWS(){
+  if(ws)try{ws.close()}catch{}
+  ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws?token=${encodeURIComponent(token)}&server=${current.id}`);
+  ws.onopen=()=>{ $("#runtimeInfo").textContent="WebSocket connected"; };
+  ws.onclose=()=>{ if(current) $("#runtimeInfo").textContent="Console disconnected"; };
+  ws.onmessage=e=>{
+    const d=JSON.parse(e.data);
+    if(d.type==="log"){
+      const c=$("#console");
+      if(c.querySelector(".console-welcome")) c.innerHTML="";
+      const text=String(d.data||"");
+      const span=document.createElement("span");
+      span.className=/error|failed|exception/i.test(text)?"log-error":/success|ready|connected|online/i.test(text)?"log-ok":"";
+      span.textContent=text;
+      c.append(span);c.scrollTop=c.scrollHeight;
+    }else if(d.type==="status"){
+      current.status=d.status;$("#detailStatus").textContent=d.status.toUpperCase();$("#detailStatus").className="status "+d.status;
+      $("#runtimeInfo").textContent=d.status==="online"?"Process running":"Process offline";
+      if(d.status==="offline") $("#runtimeInfo").textContent=`Process stopped${d.code!==undefined?" · exit "+d.code:""}`;
+    }
+  };
+  if(statsTimer)clearInterval(statsTimer);
+  statsTimer=setInterval(async()=>{if(!current)return;try{const s=await api(`/api/servers/${current.id}/stats`);$("#runtimeInfo").textContent=s.status==="online"?`Running · uptime ${fmtUptime(s.uptime)} · RAM ${fmt(s.memory)}`:"Process offline"}catch{}},3000);
+}
+function fmtUptime(sec){sec=Number(sec)||0;const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;return `${h}h ${m}m ${s}s`}
+
 async function action(type){try{await api(`/api/servers/${current.id}/${type}`,{method:"POST"});toast(type.toUpperCase()+" sent");setTimeout(loadServers,800)}catch(e){toast(e.message,true)}}
 $("#startBtn").onclick=()=>action("start");$("#stopBtn").onclick=()=>action("stop");$("#restartBtn").onclick=()=>action("restart");
 $("#stdin").addEventListener("keydown",e=>{if(e.key==="Enter"&&ws&&ws.readyState===1){ws.send(JSON.stringify({type:"stdin",data:e.target.value}));e.target.value=""}}); 
-async function loadFiles(){try{const a=await api(`/api/servers/${current.id}/files?path=${encodeURIComponent(cwd)}`);$("#cwd").textContent="/"+cwd;$("#files").innerHTML=(cwd?`<div class="file" onclick="goUp()"><span>↩</span><span class="name">..</span></div>`:"")+a.map(f=>`<div class="file" ondblclick="${f.type==="dir"?`enter('${esc(cwd?cwd+"/"+f.name:f.name)}')`:`editFile('${esc(cwd?cwd+"/"+f.name:f.name)}')`}"><span>${f.type==="dir"?"▣":"□"}</span><span class="name">${esc(f.name)}</span><span class="size">${f.type==="dir"?"DIR":fmt(f.size)}</span><button class="ghost" onclick="event.stopPropagation();removeFile('${esc(cwd?cwd+"/"+f.name:f.name)}')">×</button></div>`).join("")||`<div class="file">Empty</div>`}catch(e){toast(e.message,true)}}
+async function loadFiles(){try{const a=await api(`/api/servers/${current.id}/files?path=${encodeURIComponent(cwd)}`);$("#cwd").textContent="/"+cwd;$("#files").innerHTML=(cwd?`<div class="file" onclick="goUp()"><span>↩</span><span class="name">..</span></div>`:"")+a.map(f=>{const p=cwd?cwd+"/"+f.name:f.name;const ep=encodeURIComponent(p);return `<div class="file" ondblclick="${f.type==="dir"?`enterEncoded('${ep}')`:`editEncoded('${ep}')`}"><span class="${f.name.toLowerCase().endsWith(".zip")?"zip":""}">${f.type==="dir"?"▣":f.name.toLowerCase().endsWith(".zip")?"ZIP":"□"}</span><span class="name">${esc(f.name)}</span><span class="size">${f.type==="dir"?"DIR":fmt(f.size)}</span>${f.type==="file"&&f.name.toLowerCase().endsWith(".zip")?`<button class="ghost" onclick="event.stopPropagation();unzipEncoded('${ep}')">UNZIP</button>`:""}<button class="ghost" onclick="event.stopPropagation();removeEncoded('${ep}')">×</button></div>`}).join("")||`<div class="empty">Folder kosong</div>`}catch(e){toast(e.message,true)}}
 function fmt(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB"}
 function enter(p){cwd=p;loadFiles()}function goUp(){cwd=cwd.split("/").slice(0,-1).join("/");loadFiles()}
 async function editFile(p){try{const d=await api(`/api/servers/${current.id}/file?path=${encodeURIComponent(p)}`);editing=p;$("#editing").textContent=p;$("#editor").value=d.content;switchTab("editor")}catch(e){toast(e.message,true)}}
 async function saveFile(){if(!editing)return toast("Pilih file dulu",true);try{await api(`/api/servers/${current.id}/file`,{method:"PUT",body:{path:editing,content:$("#editor").value}});toast("File tersimpan")}catch(e){toast(e.message,true)}}
+function decodePath(v){return decodeURIComponent(v)}
+function enterEncoded(v){cwd=decodePath(v);loadFiles()}
+function editEncoded(v){editFile(decodePath(v))}
+function removeEncoded(v){removeFile(decodePath(v))}
+async function unzipEncoded(v){const p=decodePath(v);try{await api(`/api/servers/${current.id}/unzip`,{method:"POST",body:{path:p}});toast("ZIP berhasil di-unzip");loadFiles()}catch(e){toast(e.message,true)}}
+function clearConsole(){$("#console").innerHTML="";$("#runtimeInfo").textContent="Console cleared"}
 function uploadFiles(){$("#fileInput").click()}$("#fileInput").onchange=async e=>{const fd=new FormData();[...e.target.files].forEach(f=>fd.append("files",f));try{await api(`/api/servers/${current.id}/upload?path=${encodeURIComponent(cwd)}`,{method:"POST",body:fd});toast("Upload selesai");loadFiles()}catch(e){toast(e.message,true)}e.target.value=""}
 async function newFolder(){const n=prompt("Nama folder:");if(!n)return;try{await api(`/api/servers/${current.id}/mkdir`,{method:"POST",body:{path:cwd?cwd+"/"+n:n}});loadFiles()}catch(e){toast(e.message,true)}}
 async function removeFile(p){if(!confirm("Hapus "+p+"?"))return;try{await api(`/api/servers/${current.id}/file`,{method:"DELETE",body:{path:p}});loadFiles()}catch(e){toast(e.message,true)}}

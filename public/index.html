@@ -59,7 +59,11 @@
   <div class="actions"><button class="primary" id="startBtn">START</button><button class="ghost" id="restartBtn">RESTART</button><button class="danger" id="stopBtn">STOP</button></div></div>
   <div class="server-tabs"><button class="stab active" data-tab="console">CONSOLE</button><button class="stab" data-tab="files">FILES</button><button class="stab" data-tab="editor">EDITOR</button><button class="stab" data-tab="settings">SETTINGS</button></div>
   <div id="consoleTab" class="tabpage">
-    <div class="console" id="console"></div>
+    <div class="runtime-head">
+      <div><span class="live-dot"></span><b>LIVE CONSOLE</b><small id="runtimeInfo">Process offline</small></div>
+      <button class="ghost tiny" onclick="clearConsole()">CLEAR</button>
+    </div>
+    <div class="console" id="console"><div class="console-welcome">FRANXX RUNTIME<br><span>Waiting for process...</span></div></div>
     <div class="console-input"><span>›</span><input id="stdin" placeholder="Console input (Enter untuk kirim)" autocomplete="off"></div>
   </div>
   <div id="filesTab" class="tabpage hidden"><div class="filebar"><span id="cwd">/</span><button class="ghost" onclick="uploadFiles()">UPLOAD</button><button class="ghost" onclick="newFolder()">NEW FOLDER</button><input type="file" id="fileInput" multiple hidden></div><div id="files" class="filelist"></div></div>
