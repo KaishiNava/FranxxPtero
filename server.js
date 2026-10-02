@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 const os = require("os");
 const net = require("net");
 const AdmZip = require("adm-zip");
+const { createClient } = require("@supabase/supabase-js");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
@@ -31,17 +32,35 @@ const PANEL_URL = String(process.env.PANEL_URL || process.env.PUBLIC_BASE_URL ||
 const RUNTIME_PORT_START = Math.max(1024, Number(process.env.RUNTIME_PORT_START || 10000));
 const RUNTIME_PORT_END = Math.max(RUNTIME_PORT_START + 1, Number(process.env.RUNTIME_PORT_END || 20000));
 
-// Account + access-key database. When GitHub is configured, these JSON files
-// are the source of truth; local files remain as a safe development fallback.
+// ============================================================
+// SUPABASE DATABASE — runtime source of truth
+// GitHub is used ONLY for one-time legacy import when explicitly
+// configured. No account/server CRUD writes to GitHub anymore.
+// ============================================================
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+const SUPABASE_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const supabase = SUPABASE_ENABLED
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    })
+  : null;
+
+// Optional legacy GitHub source. This is NEVER written by the panel.
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
 const GITHUB_REPO = process.env.GITHUB_REPO || "";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 const GITHUB_USERS_PATH = process.env.GITHUB_USERS_PATH || "database/users.json";
 const GITHUB_KEYS_PATH = process.env.GITHUB_KEYS_PATH || "database/access-keys.json";
+const GITHUB_ENABLED = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+
 const ROOT_USERNAME = String(process.env.ROOT_USERNAME || "admin").trim().toLowerCase();
 const ROOT_PASSWORD = String(process.env.ROOT_PASSWORD || "");
-const GITHUB_ENABLED = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+
+if (!SUPABASE_ENABLED) {
+  console.warn("[supabase] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY belum diset. Panel tidak akan memakai GitHub sebagai runtime database.");
+}
 if (!process.env.JWT_SECRET) console.warn("[security] JWT_SECRET belum diset; set JWT_SECRET di Railway Variables untuk token login yang persisten.");
 
 function githubHeaders() {
@@ -62,37 +81,22 @@ async function githubReadJson(filePath, fallback = []) {
   if (!GITHUB_ENABLED) return fallback;
   const r = await fetch(`${githubApiUrl(filePath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { headers: githubHeaders() });
   if (r.status === 404) return fallback;
-  if (!r.ok) throw new Error(`GitHub database read failed (${r.status})`);
+  if (!r.ok) throw new Error(`GitHub legacy read failed (${r.status})`);
   const d = await r.json();
   return decodeGithub(d.content);
 }
-async function githubWriteJson(filePath, data, message) {
-  if (!GITHUB_ENABLED) return;
-  let sha;
-  const existing = await fetch(`${githubApiUrl(filePath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`, { headers: githubHeaders() });
-  if (existing.ok) sha = (await existing.json()).sha;
-  else if (existing.status !== 404) throw new Error(`GitHub database lookup failed (${existing.status})`);
-  const body = {
-    message,
-    content: Buffer.from(JSON.stringify(data, null, 2) + "\n", "utf8").toString("base64"),
-    branch: GITHUB_BRANCH
-  };
-  if (sha) body.sha = sha;
-  const r = await fetch(githubApiUrl(filePath), { method: "PUT", headers: githubHeaders(), body: JSON.stringify(body) });
-  if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
-    throw new Error(d.message || `GitHub database write failed (${r.status})`);
-  }
-}
+
 function normalizeUsersDatabase(value) {
   const list = Array.isArray(value) ? value : (value && Array.isArray(value.users) ? value.users : []);
   return list.filter(Boolean).map(u => {
-    const username = String(u.username || '').trim().toLowerCase();
-    // Accept the simple USERNAME/PASSWORD/ROOT shape requested for the GitHub
-    // database. A missing id is filled deterministically from the username so
-    // JWT/session lookups still work even before the account is rewritten.
-    const stableId = u.id || (username ? `usr_${crypto.createHash('sha256').update(username).digest('hex').slice(0,14)}` : id('usr'));
-    return { ...u, id: stableId, username };
+    const username = String(u.username || "").trim().toLowerCase();
+    const stableId = u.id || (username ? `usr_${crypto.createHash("sha256").update(username).digest("hex").slice(0,14)}` : id("usr"));
+    return {
+      ...u,
+      id: stableId,
+      username,
+      root: Boolean(u.root) || username === ROOT_USERNAME
+    };
   }).filter(u => u.username);
 }
 function normalizeAccessKeysDatabase(value) {
@@ -100,90 +104,231 @@ function normalizeAccessKeysDatabase(value) {
   if (value && Array.isArray(value.keys)) return value.keys;
   return [];
 }
-async function readRootUsers() {
-  const list = GITHUB_ENABLED
-    ? normalizeUsersDatabase(await githubReadJson(GITHUB_USERS_PATH, { users: [] }))
-    : normalizeUsersDatabase(await readJson(LOCAL_USERS_FILE));
 
-  // GitHub database/users.json is ROOT ONLY. The configured root username is
-  // also authoritative so an older record without root:true can be repaired.
-  return list.filter(u => Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME);
+function userFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: String(row.username || "").toLowerCase(),
+    password: row.password_hash,
+    root: Boolean(row.root),
+    createdAt: row.created_at
+  };
+}
+function userToRow(u) {
+  return {
+    id: String(u.id),
+    username: String(u.username).trim().toLowerCase(),
+    password_hash: String(u.password || u.passwordHash || ""),
+    root: Boolean(u.root),
+    created_at: u.createdAt || new Date().toISOString()
+  };
+}
+function keyFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    prefix: row.prefix,
+    keyHash: row.key_hash,
+    ownerId: row.created_by,
+    scopes: Array.isArray(row.scopes) ? row.scopes : [],
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at || null,
+    revokedAt: row.revoked_at || null
+  };
+}
+function keyToRow(k) {
+  return {
+    id: String(k.id),
+    name: String(k.name || "API Key"),
+    prefix: String(k.prefix || ""),
+    key_hash: String(k.keyHash || ""),
+    scopes: Array.isArray(k.scopes) ? k.scopes : [],
+    created_by: k.ownerId || null,
+    created_at: k.createdAt || new Date().toISOString(),
+    last_used_at: k.lastUsedAt || null,
+    revoked_at: k.revokedAt || null
+  };
+}
+function serverFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    name: row.name,
+    runtime: row.runtime,
+    entry: row.entry,
+    command: row.command,
+    memoryLimit: Number(row.memory_limit || 512),
+    env: row.env && typeof row.env === "object" ? row.env : {},
+    runtimePort: Number(row.runtime_port || 0),
+    suspended: Boolean(row.suspended),
+    suspendedAt: row.suspended_at || null,
+    suspendedReason: row.suspended_reason || null,
+    createdAt: row.created_at
+  };
+}
+function serverToRow(s) {
+  return {
+    id: String(s.id),
+    owner_id: String(s.ownerId),
+    name: String(s.name || "My Server"),
+    runtime: String(s.runtime || "node"),
+    entry: String(s.entry || "index.js"),
+    command: String(s.command || "node index.js"),
+    memory_limit: Number(s.memoryLimit || 512),
+    env: s.env && typeof s.env === "object" ? s.env : {},
+    runtime_port: Number(s.runtimePort || 0),
+    suspended: Boolean(s.suspended),
+    suspended_at: s.suspendedAt || null,
+    suspended_reason: s.suspendedReason || null,
+    created_at: s.createdAt || new Date().toISOString()
+  };
 }
 
-async function readLocalUsers() {
-  // Railway Volume users.json is NON-ROOT ONLY. Never let an accidental root
-  // record in the local file override the GitHub root database.
-  const list = normalizeUsersDatabase(await readJson(LOCAL_USERS_FILE));
-  return list.filter(u => !u.root && String(u.username).toLowerCase() !== ROOT_USERNAME);
+async function supabaseSelect(table, columns = "*") {
+  if (!supabase) throw new Error("Supabase belum dikonfigurasi");
+  const { data, error } = await supabase.from(table).select(columns);
+  if (error) throw error;
+  return data || [];
+}
+async function supabaseUpsert(table, rows) {
+  if (!supabase) throw new Error("Supabase belum dikonfigurasi");
+  if (!rows.length) return;
+  const { error } = await supabase.from(table).upsert(rows, { onConflict: "id" });
+  if (error) throw error;
+}
+async function supabaseDeleteByIds(table, ids) {
+  if (!supabase || !ids.length) return;
+  const { error } = await supabase.from(table).delete().in("id", ids);
+  if (error) throw error;
 }
 
 async function readUsers() {
-  const roots = await readRootUsers();
-  const locals = await readLocalUsers();
-  const byUsername = new Map();
-  // GitHub/root records win when the same username exists in an old local file.
-  for (const u of [...locals, ...roots]) byUsername.set(u.username, u);
-  return [...byUsername.values()];
+  const rows = await supabaseSelect("users", "id,username,password_hash,root,created_at");
+  return rows.map(userFromRow).filter(Boolean);
 }
-
-async function writeUsers(users, message = "Update users database") {
+async function writeUsers(users) {
   const normalized = normalizeUsersDatabase(users);
-  if (!GITHUB_ENABLED) return writeJson(LOCAL_USERS_FILE, normalized);
-
-  // GitHub database/users.json is ROOT ONLY. Normal users live on the Railway
-  // Persistent Volume and therefore survive deployments without touching GitHub.
-  const roots = normalized.filter(u => Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME);
-  const locals = normalized.filter(u => !roots.some(r => r.id === u.id || r.username === u.username));
-
-  await githubWriteJson(GITHUB_USERS_PATH, { users: roots }, message);
-  await writeJson(LOCAL_USERS_FILE, locals);
+  const old = await readUsers();
+  await supabaseUpsert("users", normalized.map(userToRow));
+  const keep = new Set(normalized.map(u => String(u.id)));
+  const remove = old.filter(u => !keep.has(String(u.id))).map(u => u.id);
+  await supabaseDeleteByIds("users", remove);
 }
-
 async function readAccessKeys() {
-  if (GITHUB_ENABLED) {
-    const raw = await githubReadJson(GITHUB_KEYS_PATH, { keys: [] });
-    return normalizeAccessKeysDatabase(raw);
-  }
-  if (!fs.existsSync(ACCESS_KEYS_FILE)) await writeJson(ACCESS_KEYS_FILE, []);
-  return normalizeAccessKeysDatabase(await readJson(ACCESS_KEYS_FILE));
+  const rows = await supabaseSelect("api_keys", "id,name,prefix,key_hash,scopes,created_by,created_at,last_used_at,revoked_at");
+  return rows.map(keyFromRow).filter(Boolean);
 }
-async function writeAccessKeys(keys, message = "Update access keys database") {
+async function writeAccessKeys(keys) {
   const normalized = normalizeAccessKeysDatabase(keys);
-  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, { keys: normalized }, message);
-  return writeJson(ACCESS_KEYS_FILE, normalized);
+  const old = await readAccessKeys();
+  await supabaseUpsert("api_keys", normalized.map(keyToRow));
+  const keep = new Set(normalized.map(k => String(k.id)));
+  const remove = old.filter(k => !keep.has(String(k.id))).map(k => k.id);
+  await supabaseDeleteByIds("api_keys", remove);
 }
+async function readServers() {
+  const rows = await supabaseSelect("servers", "id,owner_id,name,runtime,entry,command,memory_limit,env,runtime_port,suspended,suspended_at,suspended_reason,created_at");
+  return rows.map(serverFromRow).filter(Boolean);
+}
+async function writeServers(servers) {
+  const normalized = Array.isArray(servers) ? servers : [];
+  const old = await readServers();
+  await supabaseUpsert("servers", normalized.map(serverToRow));
+  const keep = new Set(normalized.map(s => String(s.id)));
+  const remove = old.filter(s => !keep.has(String(s.id))).map(s => s.id);
+  await supabaseDeleteByIds("servers", remove);
+}
+
 async function findUserById(userId) {
   const users = await readUsers();
-  return users.find(u => u.id === userId) || null;
+  return users.find(u => String(u.id) === String(userId)) || null;
 }
+
+async function importLegacyIfNeeded() {
+  if (!SUPABASE_ENABLED) throw new Error("SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY wajib diisi di Railway Variables");
+  const existingUsers = await readUsers();
+  const existingServers = await readServers();
+  const existingKeys = await readAccessKeys();
+
+  // Import local/legacy JSON first when present on the persistent volume.
+  const localUsers = normalizeUsersDatabase(await readJson(LOCAL_USERS_FILE));
+  const localServers = normalizeUsersDatabase(await readServers());
+  void localServers;
+
+  let legacyUsers = localUsers;
+  let legacyServers = [];
+  let legacyKeys = normalizeAccessKeysDatabase(await readJson(ACCESS_KEYS_FILE));
+
+  if (GITHUB_ENABLED) {
+    try {
+      const ghUsers = normalizeUsersDatabase(await githubReadJson(GITHUB_USERS_PATH, { users: [] }));
+      const ghKeys = normalizeAccessKeysDatabase(await githubReadJson(GITHUB_KEYS_PATH, { keys: [] }));
+      if (ghUsers.length) legacyUsers = [...legacyUsers, ...ghUsers];
+      if (ghKeys.length) legacyKeys = [...legacyKeys, ...ghKeys];
+      console.log(`[supabase] legacy GitHub import source loaded: users=${ghUsers.length}, keys=${ghKeys.length}`);
+    } catch (e) {
+      console.warn(`[supabase] legacy GitHub import skipped: ${e.message}`);
+    }
+  }
+
+  // Old server metadata may already be on the Railway volume.
+  legacyServers = await readJson(SERVERS_FILE);
+
+  const usersById = new Map(existingUsers.map(u => [String(u.id), u]));
+  const usersByName = new Map(existingUsers.map(u => [u.username, u]));
+  for (const u of legacyUsers) {
+    if (!u.username) continue;
+    const prev = usersById.get(String(u.id)) || usersByName.get(u.username);
+    if (!prev) usersById.set(String(u.id), u);
+  }
+  if (ROOT_PASSWORD && ![...usersById.values()].some(u => u.username === ROOT_USERNAME)) {
+    const root = { id: id("usr"), username: ROOT_USERNAME, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
+    usersById.set(root.id, root);
+    console.log(`[supabase] root account ${ROOT_USERNAME} dibuat dari ROOT_PASSWORD`);
+  }
+  const mergedUsers = [...usersById.values()].map(u => ({ ...u, root: Boolean(u.root) || u.username === ROOT_USERNAME }));
+  const existingUserIds = new Set(existingUsers.map(u => String(u.id)));
+  const usersToImport = mergedUsers.filter(u => !existingUserIds.has(String(u.id)));
+  if (usersToImport.length) {
+    await supabaseUpsert("users", usersToImport.map(userToRow));
+    console.log(`[supabase] imported ${usersToImport.length} user records`);
+  }
+
+  const existingServerIds = new Set(existingServers.map(s => String(s.id)));
+  const serversToImport = (Array.isArray(legacyServers) ? legacyServers : []).filter(s => !existingServerIds.has(String(s.id)));
+  if (serversToImport.length) {
+    await supabaseUpsert("servers", serversToImport.map(serverToRow));
+    console.log(`[supabase] imported ${serversToImport.length} server metadata records`);
+  }
+
+  const existingKeyIds = new Set(existingKeys.map(k => String(k.id)));
+  const keysToImport = legacyKeys.filter(k => !existingKeyIds.has(String(k.id)));
+  if (keysToImport.length) {
+    await supabaseUpsert("api_keys", keysToImport.map(keyToRow));
+    console.log(`[supabase] imported ${keysToImport.length} access keys`);
+  }
+}
+
 async function ensureRootAccount() {
-  const users = await readUsers();
+  let users = await readUsers();
   const rootName = ROOT_USERNAME || "admin";
-
-  // Always treat the configured ROOT_USERNAME as the primary root account.
-  // This also repairs older databases where the account existed but root was
-  // missing/false, which previously caused the Profile/API menu to disappear.
-  const existingRoot = users.find(u => String(u.username || "").toLowerCase() === rootName);
+  let existingRoot = users.find(u => String(u.username || "").toLowerCase() === rootName);
   if (existingRoot) {
-    let changed = false;
-    if (existingRoot.root !== true) { existingRoot.root = true; changed = true; }
-    if (!existingRoot.createdAt) { existingRoot.createdAt = new Date().toISOString(); changed = true; }
-    if (changed) await writeUsers(users, "Repair configured root account");
+    if (!existingRoot.root) {
+      existingRoot.root = true;
+      await writeUsers(users);
+    }
     return users;
   }
-
-  // If the configured root account is missing, create it even when normal
-  // users already exist. The previous implementation stopped when `users`
-  // was non-empty, which meant ROOT_USERNAME/ROOT_PASSWORD could never
-  // bootstrap the admin account after a normal user had been created.
-  if (!ROOT_PASSWORD) {
-    if (GITHUB_ENABLED && !users.length) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
-    return users;
-  }
+  if (!ROOT_PASSWORD) throw new Error(`Akun root ${rootName} belum ada. Set ROOT_USERNAME dan ROOT_PASSWORD di Railway Variables.`);
   const root = { id: id("usr"), username: rootName, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
-  const nextUsers = [...users, root];
-  await writeUsers(nextUsers, "Create configured root account");
-  return nextUsers;
+  users.push(root);
+  await writeUsers(users);
+  console.log(`[supabase] root account ${rootName} siap`);
+  return users;
 }
 
 for (const p of [
@@ -305,7 +450,7 @@ function safeServerPath(userId, serverId, relative = "") {
   return target;
 }
 async function getOwnedServer(userId, serverId) {
-  const servers = await readJson(SERVERS_FILE);
+  const servers = await readServers();
   return servers.find(s => s.id === serverId && s.ownerId === userId);
 }
 function publicServer(s) {
@@ -630,7 +775,7 @@ function rootAuth(req, res, next) {
   findUserById(req.user.id).then(async user => {
     if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
     // The configured ROOT_USERNAME is authoritative. This makes admin access
-    // survive older GitHub records that have root:false or lack the flag.
+    // survive older database records that have root:false or lack the flag.
     const configuredRoot = String(user.username || "").toLowerCase() === ROOT_USERNAME;
     if (!user.root && !configuredRoot) return res.status(403).json({ error: "Akses root/admin diperlukan" });
     if (configuredRoot && !user.root) {
@@ -641,7 +786,7 @@ function rootAuth(req, res, next) {
         if (found) found.root = true;
         await writeUsers(users, `Repair root flag for ${user.username}`);
       } catch (e) {
-        // Do not block the configured root account just because a GitHub write
+        // Do not block the configured root account just because a database write
         // is temporarily unavailable; access is still authorized by username.
         console.warn("[root] gagal menyimpan root flag:", e.message);
       }
@@ -743,7 +888,7 @@ function requireScope(scope) {
 }
 
 async function getAllServers() {
-  return readJson(SERVERS_FILE);
+  return readServers();
 }
 
 async function getAllUsersForApi() {
@@ -937,7 +1082,7 @@ app.delete("/api/access/users/:id", apiKeyAuth, requireScope("users:delete"), as
   }
 
   const nextServers = servers.filter(s => String(s.ownerId) !== String(user.id));
-  await writeJson(SERVERS_FILE, nextServers);
+  await writeServers( nextServers);
   for (const s of owned) {
     await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
   }
@@ -986,7 +1131,7 @@ app.post("/api/access/servers", apiKeyAuth, requireScope("servers:create"), asyn
   s.runtimePort = runtimePortForServer(s, servers);
 
   servers.push(s);
-  await writeJson(SERVERS_FILE, servers);
+  await writeServers( servers);
   await fsp.mkdir(serverRoot(s.id), { recursive: true });
 
   const protectedId = protectedRootServerId(servers, users);
@@ -1072,7 +1217,7 @@ app.post("/api/access/servers/:id/suspend", apiKeyAuth, requireScope("servers:su
     s.suspended = true;
     s.suspendedAt = new Date().toISOString();
     s.suspendedReason = String(req.body.reason || "Suspended by API").slice(0, 200);
-    await writeJson(SERVERS_FILE, found.servers);
+    await writeServers( found.servers);
     res.json({ ok: true, status: "offline", suspended: true, reason: s.suspendedReason });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1086,7 +1231,7 @@ app.post("/api/access/servers/:id/unsuspend", apiKeyAuth, requireScope("servers:
   s.suspended = false;
   s.suspendedAt = null;
   s.suspendedReason = null;
-  await writeJson(SERVERS_FILE, found.servers);
+  await writeServers( found.servers);
   res.json({ ok: true, status: isServerOnline(s.id) ? "online" : "offline", suspended: false });
 });
 
@@ -1133,7 +1278,7 @@ app.delete("/api/access/servers/:id", apiKeyAuth, requireScope("servers:delete")
     });
   }
 
-  await writeJson(SERVERS_FILE, servers.filter(x => x.id !== s.id));
+  await writeServers( servers.filter(x => x.id !== s.id));
   await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
 
   res.json({ ok: true, deleted: s.id });
@@ -1227,7 +1372,7 @@ app.get("/api/access/servers/:id/ping", apiKeyAuth, requireScope("servers:stats"
 });
 
 app.get("/api/servers", auth, async (req, res) => {
-  const servers = await readJson(SERVERS_FILE);
+  const servers = await readServers();
   res.json(servers.filter(s => s.ownerId === req.user.id).map(publicServer));
 });
 
@@ -1252,14 +1397,14 @@ app.post("/api/servers", async (req, res, next) => {
   if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
   const memoryLimit = parseMemoryMB(req.body.memoryLimit, 512);
 
-  const servers = await readJson(SERVERS_FILE);
+  const servers = await readServers();
   const s = {
     id: id("srv"), ownerId, name, runtime, entry, command,
     memoryLimit, env: {}, runtimePort: 0, createdAt: new Date().toISOString()
   };
   s.runtimePort = runtimePortForServer(s, servers);
   servers.push(s);
-  await writeJson(SERVERS_FILE, servers);
+  await writeServers( servers);
   await fsp.mkdir(serverRoot(s.id), { recursive: true });
   res.json(publicServer(s));
 });
@@ -1268,8 +1413,8 @@ app.delete("/api/servers/:id", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
   await stopServer(s.id);
-  const servers = await readJson(SERVERS_FILE);
-  await writeJson(SERVERS_FILE, servers.filter(x => x.id !== s.id));
+  const servers = await readServers();
+  await writeServers( servers.filter(x => x.id !== s.id));
   await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
   res.json({ ok: true });
 });
@@ -1390,7 +1535,7 @@ app.delete("/api/servers/:id/files/bulk", auth, async (req, res) => {
 });
 
 app.put("/api/servers/:id/settings", auth, async (req, res) => {
-  const servers = await readJson(SERVERS_FILE);
+  const servers = await readServers();
   const s = servers.find(x => x.id === req.params.id && x.ownerId === req.user.id);
   if (!s) return res.status(404).json({error:"Server tidak ditemukan"});
   const command = String(req.body.command || "").trim();
@@ -1400,7 +1545,7 @@ app.put("/api/servers/:id/settings", auth, async (req, res) => {
   s.command = command;
   s.entry = entry;
   s.memoryLimit = memoryLimit;
-  await writeJson(SERVERS_FILE, servers);
+  await writeServers( servers);
   res.json({ok:true});
 });
 
@@ -1550,6 +1695,17 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || "Internal server error" });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`FX PROJECT — FRANXX PTERO running on ${HOST}:${PORT}`);
-});
+async function bootstrap() {
+  try {
+    await importLegacyIfNeeded();
+    await ensureRootAccount();
+    server.listen(PORT, HOST, () => {
+      console.log(`FX PROJECT — FRANXX PTERO running on ${HOST}:${PORT}`);
+      console.log(`[storage] Supabase metadata DB + Railway Volume files: ${DATA}`);
+    });
+  } catch (e) {
+    console.error(`[startup] gagal menyiapkan database: ${e.message}`);
+    process.exit(1);
+  }
+}
+bootstrap();
