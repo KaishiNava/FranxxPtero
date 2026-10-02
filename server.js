@@ -134,14 +134,18 @@ async function ensureRootAccount() {
     return users;
   }
 
-  if (users.length) return users;
+  // If the configured root account is missing, create it even when normal
+  // users already exist. The previous implementation stopped when `users`
+  // was non-empty, which meant ROOT_USERNAME/ROOT_PASSWORD could never
+  // bootstrap the admin account after a normal user had been created.
   if (!ROOT_PASSWORD) {
-    if (GITHUB_ENABLED) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
+    if (GITHUB_ENABLED && !users.length) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
     return users;
   }
   const root = { id: id("usr"), username: rootName, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
-  await writeUsers([root], "Create initial root account");
-  return [root];
+  const nextUsers = [...users, root];
+  await writeUsers(nextUsers, "Create configured root account");
+  return nextUsers;
 }
 
 for (const p of [DATA, SERVERS_DIR]) fs.mkdirSync(p, { recursive: true });
@@ -157,7 +161,18 @@ const processes = new Map();
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
+// Always serve the panel shell/assets fresh after a Railway deployment.
+// This prevents an old cached app.js from hiding the root navigation after
+// the backend has already been updated.
+app.use((req, res, next) => {
+  if (req.path === "/" || req.path === "/index.html" || req.path === "/app.js" || req.path === "/style.css") {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname, "public"), { etag: false, lastModified: false }));
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -446,9 +461,25 @@ app.get("/api/me", auth, async (req, res) => {
 });
 
 function rootAuth(req, res, next) {
-  findUserById(req.user.id).then(user => {
+  findUserById(req.user.id).then(async user => {
     if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
-    if (!user.root) return res.status(403).json({ error: "Akses root/admin diperlukan" });
+    // The configured ROOT_USERNAME is authoritative. This makes admin access
+    // survive older GitHub records that have root:false or lack the flag.
+    const configuredRoot = String(user.username || "").toLowerCase() === ROOT_USERNAME;
+    if (!user.root && !configuredRoot) return res.status(403).json({ error: "Akses root/admin diperlukan" });
+    if (configuredRoot && !user.root) {
+      user.root = true;
+      try {
+        const users = await readUsers();
+        const found = users.find(u => u.id === user.id || u.username === user.username);
+        if (found) found.root = true;
+        await writeUsers(users, `Repair root flag for ${user.username}`);
+      } catch (e) {
+        // Do not block the configured root account just because a GitHub write
+        // is temporarily unavailable; access is still authorized by username.
+        console.warn("[root] gagal menyimpan root flag:", e.message);
+      }
+    }
     req.account = user;
     next();
   }).catch(e => res.status(500).json({ error: e.message }));
