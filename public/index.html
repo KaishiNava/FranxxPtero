@@ -56,7 +56,7 @@
   <div class="side-label">NAVIGATION</div>
   <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
   <button class="nav" data-page="servers"><span>02</span> My Servers</button>
-  <button class="mobile-create" onclick="openCreate();document.getElementById('side').classList.remove('open')"><span>＋</span><div><b>ADD SERVER</b><small>Create a new runtime</small></div></button>
+  <button class="mobile-create" id="addServerMenu" onclick="openCreate();document.getElementById('side').classList.remove('open')"><span>＋</span><div><b>ADD SERVER</b><small>Create a new runtime</small></div></button>
   <div class="side-spacer"></div>
   <div class="side-status"><span class="dot"></span><div><b>Private Mode</b><small>Runtime ready</small></div></div>
 </aside>
@@ -71,7 +71,7 @@
       <p>Kelola server, bot, files, runtime dan console dari satu tempat.</p>
       <div class="hero-chips"><span>REAL-TIME CONSOLE</span><span>FILE MANAGER</span><span>RESOURCE MONITOR</span></div>
     </div>
-    <div class="hero-action"><div class="hero-orb"><img src="https://zfile.web.id/PBe7sdw.png" alt=""></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+    <div class="hero-action"><div class="hero-orb"><img src="https://zfile.web.id/PBe7sdw.png" alt=""></div><div class="hero-note"><b>PRIVATE RUNTIME</b><span>Create servers from the ☰ menu.</span></div></div>
   </div>
   <div class="cards cards-new">
     <div class="card stat-card"><div class="stat-top"><span class="stat-icon">SV</span><small>SERVERS</small></div><strong id="serverCount">0</strong><span>Total server kamu</span><div class="stat-line"><i></i></div></div>
@@ -83,7 +83,7 @@
 </div>
 
 <div id="servers" class="page hidden">
-  <div class="section-head page-heading"><div><label>MANAGEMENT</label><h1>My Servers</h1><p>Semua runtime yang kamu buat ada di sini.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+  <div class="section-head page-heading"><div><label>MANAGEMENT</label><h1>My Servers</h1><p>Semua runtime yang kamu buat ada di sini.</p></div></div>
   <div id="serverGrid" class="server-grid"></div>
 </div>
 
