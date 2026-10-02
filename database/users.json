@@ -1,9 +1,18 @@
-[
-  {
-    "id": "usr_6c88d54fd36baf",
-    "username": "admin",
-    "password": "$2a$12$uDtoLUEBixX615aDMZsiu.AShwtEW.h/84svAzjW.n1rdF8BkjKqi",
-    "root": true,
-    "createdAt": "2026-10-02T13:02:55.491Z"
-  }
-]
+{
+  "users": [
+    {
+      "id": "usr_6c88d54fd36baf",
+      "username": "admin",
+      "password": "$2a$12$uDtoLUEBixX615aDMZsiu.AShwtEW.h/84svAzjW.n1rdF8BkjKqi",
+      "root": true,
+      "createdAt": "2026-10-02T13:02:55.491Z"
+    },
+    {
+      "id": "usr_2c89e469a62d3f",
+      "username": "sapaa",
+      "password": "$2a$12$qJ89RhZP9.mJ8Bbrw0GTKeZn0aev5IqkRHdoljNIySOj8k9o4/Ys2",
+      "root": false,
+      "createdAt": "2026-10-02T13:49:50.286Z"
+    }
+  ]
+}
