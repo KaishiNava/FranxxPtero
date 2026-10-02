@@ -1,3 +1,18 @@
 {
-  "keys": []
+  "keys": [
+    {
+      "id": "key_d585068efbccf1",
+      "name": "cpanel",
+      "prefix": "fx_live_2574fb03",
+      "keyHash": "04079a1f8d274c42a2a6c4476eb8c7d975154aa6fad130fe67c73b6af7a4f74b",
+      "ownerId": "usr_6c88d54fd36baf",
+      "scopes": [
+        "users:create",
+        "servers:create"
+      ],
+      "createdAt": "2026-10-02T13:26:58.668Z",
+      "revokedAt": null,
+      "lastUsedAt": null
+    }
+  ]
 }
