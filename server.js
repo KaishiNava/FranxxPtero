@@ -120,12 +120,26 @@ async function findUserById(userId) {
 }
 async function ensureRootAccount() {
   const users = await readUsers();
+  const rootName = ROOT_USERNAME || "admin";
+
+  // Always treat the configured ROOT_USERNAME as the primary root account.
+  // This also repairs older databases where the account existed but root was
+  // missing/false, which previously caused the Profile/API menu to disappear.
+  const existingRoot = users.find(u => String(u.username || "").toLowerCase() === rootName);
+  if (existingRoot) {
+    let changed = false;
+    if (existingRoot.root !== true) { existingRoot.root = true; changed = true; }
+    if (!existingRoot.createdAt) { existingRoot.createdAt = new Date().toISOString(); changed = true; }
+    if (changed) await writeUsers(users, "Repair configured root account");
+    return users;
+  }
+
   if (users.length) return users;
   if (!ROOT_PASSWORD) {
     if (GITHUB_ENABLED) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
     return users;
   }
-  const root = { id: id("usr"), username: ROOT_USERNAME || "admin", password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
+  const root = { id: id("usr"), username: rootName, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
   await writeUsers([root], "Create initial root account");
   return [root];
 }
@@ -398,10 +412,26 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const users = await ensureRootAccount();
     const user = users.find(u => u.username === username);
-    if (!user || !(await bcrypt.compare(password, user.password || user.passwordHash || "")))
-      return res.status(401).json({ error: "Username atau password salah" });
-    const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: "30d" });
-    res.json({ token, user: { id: user.id, username, root: Boolean(user.root) } });
+    let valid = false;
+    const stored = String(user?.password || user?.passwordHash || "");
+    if (user && stored) {
+      // Accept legacy plaintext entries only long enough to migrate them to
+      // bcrypt after a successful login. New accounts are always hashed.
+      if (stored.startsWith("$2")) valid = await bcrypt.compare(password, stored);
+      else valid = stored === password;
+    }
+    if (!user || !valid) return res.status(401).json({ error: "Username atau password salah" });
+
+    if (!stored.startsWith("$2")) {
+      user.password = await bcrypt.hash(password, 12);
+      delete user.passwordHash;
+      await writeUsers(users, `Migrate password for ${username}`);
+    }
+
+    const root = Boolean(user.root) || username === ROOT_USERNAME;
+    if (root && !user.root) { user.root = true; await writeUsers(users, `Repair root flag for ${username}`); }
+    const token = jwt.sign({ id: user.id, username, root }, JWT_SECRET, { expiresIn: "30d" });
+    res.json({ token, user: { id: user.id, username, root } });
   } catch (e) {
     res.status(500).json({ error: e.message || "Database akun tidak tersedia" });
   }
@@ -410,7 +440,9 @@ app.post("/api/auth/login", async (req, res) => {
 app.get("/api/me", auth, async (req, res) => {
   const user = await findUserById(req.user.id);
   if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
-  res.json({ id: user.id, username: user.username, root: Boolean(user.root), createdAt: user.createdAt });
+  const root = Boolean(user.root) || user.username === ROOT_USERNAME;
+  if (root && !user.root) { user.root = true; await writeUsers(await readUsers(), `Repair root flag for ${user.username}`); }
+  res.json({ id: user.id, username: user.username, root, createdAt: user.createdAt });
 });
 
 function rootAuth(req, res, next) {
