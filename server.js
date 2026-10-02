@@ -346,6 +346,32 @@ app.put("/api/servers/:id/settings", auth, async (req, res) => {
   res.json({ok:true});
 });
 
+
+app.post("/api/servers/:id/unzip", auth, async (req, res) => {
+  const s = await getOwnedServer(req.user.id, req.params.id);
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  try {
+    const rel = String(req.body.path || "");
+    if (!rel.toLowerCase().endsWith(".zip")) return res.status(400).json({ error: "File harus .zip" });
+    const zipPath = safeServerPath(req.user.id, s.id, rel);
+    const stat = await fsp.stat(zipPath);
+    if (!stat.isFile()) return res.status(400).json({ error: "Bukan file" });
+
+    const root = path.resolve(serverRoot(s.id));
+    const zip = new (require("adm-zip"))(zipPath);
+    for (const entry of zip.getEntries()) {
+      const target = path.resolve(root, entry.entryName);
+      if (!target.startsWith(root + path.sep) && target !== root) {
+        return res.status(400).json({ error: "ZIP berisi path tidak aman" });
+      }
+    }
+    zip.extractAllTo(root, true);
+    res.json({ ok: true, message: "ZIP berhasil di-extract" });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.get("/api/servers/:id/stats", auth, async (req,res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({error:"Server tidak ditemukan"});

@@ -1,42 +1,42 @@
 # FX PROJECT — FRANXX PTERO
 
-Lightweight private-use panel untuk Railway / Node.js.
+Private lightweight Pterodactyl-style panel for Railway.
 
-## Fitur
+## Features
 - Register / login
-- JSON user + server storage
-- JWT session 30 hari di LocalStorage
-- Multi-server per user
+- JSON users + server metadata
+- JWT session stored in LocalStorage
+- Multiple servers per user
 - Start / stop / restart process
-- Realtime console via WebSocket
-- Upload file
+- Live WebSocket console
+- Runtime status + uptime + RAM display
+- Console stdin
+- Upload files
+- ZIP upload + one-click UNZIP
+- ZIP path traversal protection
 - File browser
 - Create folder
 - Delete file/folder
-- Edit/save file
+- Built-in file editor
 - Configurable startup command
 - Responsive mobile UI
+- Animated dark FRANXX interface
 - Railway PORT support
 
-## Local
+## Run
 ```bash
 npm install
 npm start
 ```
 
-Buka `http://localhost:3000`.
-
 ## Railway
-1. Upload project ke GitHub.
-2. Buat Railway service dari repository.
-3. Railway akan menjalankan `npm start`.
-4. Set variable:
-   - `JWT_SECRET` = random secret panjang
-   - `MAX_UPLOAD_MB` = misalnya `100`
-5. Generate domain Railway.
+Set:
+- `JWT_SECRET` = long random secret
+- `MAX_UPLOAD_MB` = optional, default 100
 
-## Catatan persistence
-Folder `data/` berisi users, server metadata, dan file server. Railway container filesystem bukan tempat ideal untuk persistence jangka panjang. Untuk private testing, ini cukup. Untuk deployment yang harus survive redeploy/recreate, gunakan Railway Volume atau object/database storage.
+The app uses Railway's `PORT` automatically.
 
-## Keamanan
-Panel ini dibuat untuk private use. Jangan membuka endpoint ini ke publik tanpa menambahkan rate limit, HTTPS, admin controls, resource limits, dan sandbox/container isolation.
+## Important
+This is intentionally a private-use process runner. Uploaded/user-provided commands execute in the panel's runtime environment. Do not expose this publicly without proper authentication hardening, rate limits, resource limits, sandbox/container isolation, and persistent storage.
+
+For persistence across Railway container recreation/redeploy, use a Railway Volume or external database/object storage. JSON/filesystem storage is suitable for private testing only.
