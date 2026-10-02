@@ -2,61 +2,86 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#08090c">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="FRANXX PTERO — lightweight server and bot control panel by KYZX FRANXX DEV.">
+<meta property="og:title" content="FRANXX PTERO — FX PROJECT">
+<meta property="og:description" content="Lightweight server and bot control panel.">
+<meta property="og:image" content="https://zfile.web.id/ptVnzVN.png">
+<link rel="icon" type="image/png" href="https://zfile.web.id/PBe7sdw.png">
+<link rel="shortcut icon" type="image/png" href="https://zfile.web.id/PBe7sdw.png">
+<link rel="apple-touch-icon" href="https://zfile.web.id/PBe7sdw.png">
 <title>FRANXX PTERO — FX PROJECT</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="toast"></div>
+<div id="toast" aria-live="polite"></div>
 
 <section id="auth" class="auth">
-  <div class="auth-card">
-    <div class="brand"><span>FX</span> PROJECT</div>
-    <div class="sub">FRANXX PTERO</div>
-    <div class="tabs"><button class="active" data-mode="login">LOGIN</button><button data-mode="register">REGISTER</button></div>
-    <form id="authForm">
-      <input id="username" autocomplete="username" placeholder="Username" required>
-      <input id="password" autocomplete="current-password" type="password" placeholder="Password" required>
-      <button class="primary" type="submit" id="authBtn">LOGIN</button>
-    </form>
-    <small>Private-use lightweight server panel</small>
+  <div class="auth-shell">
+    <div class="auth-brand">
+      <div class="auth-logo-wrap"><img src="https://zfile.web.id/PBe7sdw.png" alt="FRANXX PTERO logo" class="brand-logo"></div>
+      <div>
+        <div class="brand-title">FRANXX <span>PTERO</span></div>
+        <div class="brand-kicker">FX PROJECT / SERVER PANEL</div>
+      </div>
+    </div>
+    <div class="auth-card">
+      <div class="auth-heading"><span>PRIVATE CONTROL</span><h1>Welcome.</h1><p>Kelola server dan bot kamu dari satu tempat.</p></div>
+      <div class="tabs"><button class="active" data-mode="login">LOGIN</button><button data-mode="register">REGISTER</button></div>
+      <form id="authForm">
+        <input id="username" autocomplete="username" placeholder="Username" required>
+        <input id="password" autocomplete="current-password" type="password" placeholder="Password" required>
+        <button class="primary" type="submit" id="authBtn">LOGIN</button>
+      </form>
+      <small>Private-use lightweight server panel</small>
+    </div>
+    <div class="auth-mark"><img src="https://zfile.web.id/PBe7sdw.png" alt="" loading="lazy"><span>KYZX FRANXX DEV</span></div>
   </div>
 </section>
 
 <section id="app" class="hidden">
 <header>
-  <button id="mobileMenu" class="icon">☰</button>
-  <div class="brand"><span>FX</span> PROJECT <i>/ FRANXX PTERO</i></div>
-  <div class="header-right"><b id="who"></b><button id="logout" class="ghost">LOGOUT</button></div>
+  <button id="mobileMenu" class="icon" aria-label="Open menu">☰</button>
+  <a class="header-brand" href="#" onclick="showPage('dashboard');return false" aria-label="FRANXX PTERO home">
+    <img src="https://zfile.web.id/PBe7sdw.png" alt="FRANXX PTERO" class="header-logo">
+    <span><b>FRANXX</b><small>PTERO</small></span>
+  </a>
+  <div class="header-right"><div class="account"><span class="account-dot"></span><b id="who"></b></div><button id="logout" class="ghost">LOGOUT</button></div>
 </header>
 <div class="layout">
 <aside id="side">
-  <button class="nav active" data-page="dashboard">Dashboard</button>
-  <button class="nav" data-page="servers">My Servers</button>
-  <div class="side-bottom"><span>Private Mode</span><span class="dot"></span></div>
+  <div class="side-brand"><img src="https://zfile.web.id/PBe7sdw.png" alt="FRANXX PTERO"><div><b>FRANXX PTERO</b><small>CONTROL PANEL</small></div></div>
+  <div class="side-label">NAVIGATION</div>
+  <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
+  <button class="nav" data-page="servers"><span>02</span> My Servers</button>
+  <div class="side-spacer"></div>
+  <div class="side-status"><span class="dot"></span><div><b>Private Mode</b><small>Runtime ready</small></div></div>
 </aside>
 
 <main>
 <div id="dashboard" class="page">
-  <div class="hero"><div><label>CONTROL PANEL</label><h1>Welcome back.</h1><p>Kelola server dan bot kamu dari satu tempat.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+  <section class="top-banner" aria-label="FRANXX PTERO banner"><img src="https://zfile.web.id/ptVnzVN.png" alt="FRANXX PTERO banner"><div class="banner-shade"></div><div class="banner-content"><span>FRANXX PTERO</span><b>CONTROL YOUR<br>RUNTIME.</b><small>Simple. Fast. Yours.</small></div></section>
+  <div class="hero"><div><label>CONTROL PANEL</label><h1>Welcome back.</h1><p>Kelola server, bot, files, runtime dan console dari satu tempat.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
   <div class="cards">
-    <div class="card"><small>SERVERS</small><strong id="serverCount">0</strong></div>
-    <div class="card"><small>ONLINE</small><strong id="onlineCount">0</strong></div>
-    <div class="card"><small>PLATFORM</small><strong>RAILWAY</strong></div>
+    <div class="card stat-card"><div class="stat-icon">SV</div><small>SERVERS</small><strong id="serverCount">0</strong><span>Total server kamu</span></div>
+    <div class="card stat-card"><div class="stat-icon live">●</div><small>ONLINE</small><strong id="onlineCount">0</strong><span>Runtime aktif</span></div>
+    <div class="card stat-card"><div class="stat-icon">FX</div><small>PLATFORM</small><strong>RAILWAY</strong><span>Deployment ready</span></div>
   </div>
-  <div class="section-head"><h2>Recent Servers</h2><button class="ghost" onclick="loadServers()">Refresh</button></div>
+  <div class="section-head"><div><label>OVERVIEW</label><h2>Recent Servers</h2></div><button class="ghost" onclick="loadServers()">↻ Refresh</button></div>
   <div id="recent" class="server-grid"></div>
 </div>
 
 <div id="servers" class="page hidden">
-  <div class="section-head"><div><label>MANAGEMENT</label><h1>My Servers</h1></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+  <div class="section-head page-heading"><div><label>MANAGEMENT</label><h1>My Servers</h1><p>Semua runtime yang kamu buat ada di sini.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
   <div id="serverGrid" class="server-grid"></div>
 </div>
 
 <div id="serverDetail" class="page hidden">
   <div class="server-top"><div><button class="back" onclick="showPage('servers')">← Servers</button><label id="detailRuntime"></label><h1 id="detailName">Server</h1><span id="detailStatus" class="status">OFFLINE</span></div>
   <div class="actions"><button class="primary" id="startBtn">START</button><button class="ghost" id="restartBtn">RESTART</button><button class="danger" id="stopBtn">STOP</button></div></div>
+  <div class="detail-banner"><img src="https://zfile.web.id/ptVnzVN.png" alt="FRANXX PTERO" loading="lazy"><div><span>SERVER RUNTIME</span><b id="detailBannerName">FRANXX PTERO</b></div></div>
   <div class="server-tabs"><button class="stab active" data-tab="console">CONSOLE</button><button class="stab" data-tab="files">FILES</button><button class="stab" data-tab="editor">EDITOR</button><button class="stab" data-tab="settings">SETTINGS</button></div>
   <div id="consoleTab" class="tabpage">
     <div class="runtime-head">
@@ -74,23 +99,25 @@
     </div>
   </div>
   <div id="filesTab" class="tabpage hidden"><div class="filebar"><span id="cwd">/</span><button class="ghost" onclick="uploadFiles()">UPLOAD</button><button class="ghost" onclick="newFolder()">NEW FOLDER</button><button class="ghost" onclick="selectAllFiles()">SELECT ALL</button><button class="ghost" onclick="clearSelection()">CLEAR</button><span class="selected-indicator"><b id="selectedCount">0</b> selected</span><button class="danger" id="deleteSelected" onclick="deleteSelected()" disabled>DELETE</button><button class="ghost" id="zipSelected" onclick="zipSelected()" disabled>MAKE ZIP</button><button class="primary" id="downloadSelected" onclick="downloadZip()" disabled>DOWNLOAD ZIP</button><input type="file" id="fileInput" multiple hidden></div><div id="files" class="filelist"></div></div>
-  <div id="editorTab" class="tabpage hidden"><div class="editorbar"><span id="editing">No file selected</span><button class="primary" onclick="saveFile()">SAVE</button></div><textarea id="editor" spellcheck="false"></textarea></div>
+  <div id="editorTab" class="tabpage hidden"><div class="editorbar"><span id="editing">No file selected</span><button class="primary" onclick="saveFile()">SAVE</button></div><textarea id="editor" class="editor" spellcheck="false"></textarea></div>
   <div id="settingsTab" class="tabpage hidden"><div class="settings"><label>COMMAND</label><input id="commandInput"><label>ENTRY FILE</label><input id="entryInput"><label>RAM ALLOCATION (MB)</label><input id="memoryInput" type="number" min="64" max="32768" step="64"><small class="settings-note">Dipakai sebagai batas/alokasi monitor RAM server. Nilai aktual mengikuti runtime host.</small><button class="primary" onclick="saveSettings()">SAVE SETTINGS</button><hr><button class="danger" onclick="deleteServer()">DELETE SERVER</button></div></div>
 </div>
+
+<footer><span>© 2025 - 2026 KYZX FRANXX DEV</span><span>FRANXX PTERO <i>•</i> FX PROJECT</span></footer>
 </main>
 </div>
 </section>
 
 <div id="modal" class="modal hidden">
-<div class="modal-card"><button class="modal-x" onclick="closeModal()">×</button><h2>Create Server</h2>
+<div class="modal-card"><button class="modal-x" onclick="closeModal()">×</button><div class="modal-brand"><img src="https://zfile.web.id/PBe7sdw.png" alt=""><div><span>FRANXX PTERO</span><b>CREATE SERVER</b></div></div>
 <input id="newName" placeholder="Server name">
 <select id="newRuntime"><option value="node">Node.js</option><option value="python">Python</option><option value="custom">Custom</option></select>
 <input id="newEntry" placeholder="Entry file" value="index.js">
 <input id="newCommand" placeholder="Start command" value="node index.js">
 <label class="modal-label">RAM ALLOCATION</label>
 <div class="ram-input-row"><input id="newMemory" type="number" min="64" max="32768" step="64" value="512" placeholder="512"><span>MB</span></div>
-<div class="preset-row"><button type="button" class="ghost" onclick="$("#newMemory").value=256">256 MB</button><button type="button" class="ghost" onclick="$("#newMemory").value=512">512 MB</button><button type="button" class="ghost" onclick="$("#newMemory").value=1024">1 GB</button><button type="button" class="ghost" onclick="$("#newMemory").value=2048">2 GB</button></div>
-<button class="primary wide" onclick="createServer()">CREATE</button></div></div>
+<div class="preset-row"><button type="button" class="ghost" data-memory="256">256 MB</button><button type="button" class="ghost" data-memory="512">512 MB</button><button type="button" class="ghost" data-memory="1024">1 GB</button><button type="button" class="ghost" data-memory="2048">2 GB</button></div>
+<button class="primary wide" onclick="createServer()">CREATE SERVER</button></div></div>
 <script src="/app.js"></script>
 </body>
 </html>
