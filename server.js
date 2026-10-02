@@ -279,14 +279,23 @@ async function importLegacyIfNeeded() {
 
   const usersById = new Map(existingUsers.map(u => [String(u.id), u]));
   const usersByName = new Map(existingUsers.map(u => [u.username, u]));
+  const legacyUserIdMap = new Map();
   for (const u of legacyUsers) {
     if (!u.username) continue;
-    const prev = usersById.get(String(u.id)) || usersByName.get(u.username);
-    if (!prev) usersById.set(String(u.id), u);
+    const oldId = String(u.id);
+    const prev = usersById.get(oldId) || usersByName.get(u.username);
+    if (prev) {
+      legacyUserIdMap.set(oldId, String(prev.id));
+      continue;
+    }
+    usersById.set(oldId, u);
+    usersByName.set(u.username, u);
+    legacyUserIdMap.set(oldId, oldId);
   }
   if (ROOT_PASSWORD && ![...usersById.values()].some(u => u.username === ROOT_USERNAME)) {
     const root = { id: id("usr"), username: ROOT_USERNAME, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
     usersById.set(root.id, root);
+    usersByName.set(root.username, root);
     console.log(`[supabase] root account ${ROOT_USERNAME} dibuat dari ROOT_PASSWORD`);
   }
   const mergedUsers = [...usersById.values()].map(u => ({ ...u, root: Boolean(u.root) || u.username === ROOT_USERNAME }));
@@ -297,8 +306,28 @@ async function importLegacyIfNeeded() {
     console.log(`[supabase] imported ${usersToImport.length} user records`);
   }
 
+  // IMPORTANT: servers.owner_id has a foreign-key constraint to users.id.
+  // Always ensure the root user exists before importing old server metadata,
+  // then repair orphaned legacy owners by assigning those servers to root.
+  const usersAfterImport = await readUsers();
+  const rootUser = usersAfterImport.find(u => String(u.username).toLowerCase() === ROOT_USERNAME);
+  if (!rootUser) {
+    throw new Error(`Root user ${ROOT_USERNAME} tidak ditemukan di Supabase. Set ROOT_USERNAME + ROOT_PASSWORD lalu restart.`);
+  }
+
   const existingServerIds = new Set(existingServers.map(s => String(s.id)));
-  const serversToImport = (Array.isArray(legacyServers) ? legacyServers : []).filter(s => !existingServerIds.has(String(s.id)));
+  const knownUserIds = new Set(usersAfterImport.map(u => String(u.id)));
+  const serversToImport = (Array.isArray(legacyServers) ? legacyServers : [])
+    .filter(s => !existingServerIds.has(String(s.id)))
+    .map(s => {
+      const oldOwner = String(s.ownerId || s.owner_id || "");
+      const mappedOwner = legacyUserIdMap.get(oldOwner) || oldOwner;
+      if (!knownUserIds.has(mappedOwner)) {
+        console.warn(`[supabase] orphan server ${s.id}: owner ${oldOwner || "unknown"} tidak ditemukan, dipindah ke root ${rootUser.id}`);
+        return { ...s, ownerId: rootUser.id, owner_id: rootUser.id };
+      }
+      return { ...s, ownerId: mappedOwner, owner_id: mappedOwner };
+    });
   if (serversToImport.length) {
     await supabaseUpsert("servers", serversToImport.map(serverToRow));
     console.log(`[supabase] imported ${serversToImport.length} server metadata records`);
