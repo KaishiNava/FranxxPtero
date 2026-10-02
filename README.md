@@ -34,20 +34,24 @@ Private-use lightweight server and bot control panel.
 The GitHub user database uses the requested shape. The `password` field contains a bcrypt hash, never the plaintext password:
 
 ```json
-[
-  {
-    "id": "usr_xxx",
-    "username": "admin",
-    "password": "$2b$12$...",
-    "root": true,
-    "createdAt": "2026-10-02T00:00:00.000Z"
-  }
-]
+{
+  "users": [
+    {
+      "id": "usr_xxx",
+      "username": "admin",
+      "password": "$2b$12$...",
+      "root": true,
+      "createdAt": "2026-10-02T00:00:00.000Z"
+    }
+  ]
+}
 ```
+
+The server also accepts the older top-level array format for backward compatibility. `password` must be a bcrypt hash, not plaintext.
 
 Normal users use `root: false`.
 
-Access keys are stored separately in `database/access-keys.json`; only the SHA-256 hash of the secret is stored.
+Access keys are stored separately in `database/access-keys.json` using `{ "keys": [] }`; only the SHA-256 hash of the secret is stored.
 
 ## GitHub configuration
 
@@ -112,7 +116,7 @@ npm install
 npm start
 ```
 
-Set `JWT_SECRET` in production. Optional upload limit can be changed with `MAX_UPLOAD_MB`.
+Set `JWT_SECRET` in production and keep GitHub credentials only in Railway Variables. Never commit `.env` or real tokens. Optional upload limit can be changed with `MAX_UPLOAD_MB`.
 
 ## Branding
 

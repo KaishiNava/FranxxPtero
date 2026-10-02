@@ -32,6 +32,7 @@ const GITHUB_KEYS_PATH = process.env.GITHUB_KEYS_PATH || "database/access-keys.j
 const ROOT_USERNAME = String(process.env.ROOT_USERNAME || "admin").trim().toLowerCase();
 const ROOT_PASSWORD = String(process.env.ROOT_PASSWORD || "");
 const GITHUB_ENABLED = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+if (!process.env.JWT_SECRET) console.warn("[security] JWT_SECRET belum diset; set JWT_SECRET di Railway Variables untuk token login yang persisten.");
 
 function githubHeaders() {
   return {
@@ -73,24 +74,45 @@ async function githubWriteJson(filePath, data, message) {
     throw new Error(d.message || `GitHub database write failed (${r.status})`);
   }
 }
+function normalizeUsersDatabase(value) {
+  const list = Array.isArray(value) ? value : (value && Array.isArray(value.users) ? value.users : []);
+  return list.filter(Boolean).map(u => {
+    const username = String(u.username || '').trim().toLowerCase();
+    // Accept the simple USERNAME/PASSWORD/ROOT shape requested for the GitHub
+    // database. A missing id is filled deterministically from the username so
+    // JWT/session lookups still work even before the account is rewritten.
+    const stableId = u.id || (username ? `usr_${crypto.createHash('sha256').update(username).digest('hex').slice(0,14)}` : id('usr'));
+    return { ...u, id: stableId, username };
+  }).filter(u => u.username);
+}
+function normalizeAccessKeysDatabase(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.keys)) return value.keys;
+  return [];
+}
 async function readUsers() {
-  if (GITHUB_ENABLED) return githubReadJson(GITHUB_USERS_PATH, []);
-  return readJson(USERS_FILE);
+  const raw = GITHUB_ENABLED ? await githubReadJson(GITHUB_USERS_PATH, { users: [] }) : await readJson(USERS_FILE);
+  return normalizeUsersDatabase(raw);
 }
 async function writeUsers(users, message = "Update users database") {
-  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_USERS_PATH, users, message);
-  return writeJson(USERS_FILE, users);
+  const normalized = normalizeUsersDatabase(users);
+  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_USERS_PATH, { users: normalized }, message);
+  return writeJson(USERS_FILE, normalized);
 }
 async function readAccessKeys() {
-  if (GITHUB_ENABLED) return githubReadJson(GITHUB_KEYS_PATH, []);
   const f = path.join(DATA, "access-keys.json");
+  if (GITHUB_ENABLED) {
+    const raw = await githubReadJson(GITHUB_KEYS_PATH, { keys: [] });
+    return normalizeAccessKeysDatabase(raw);
+  }
   if (!fs.existsSync(f)) await writeJson(f, []);
-  return readJson(f);
+  return normalizeAccessKeysDatabase(await readJson(f));
 }
 async function writeAccessKeys(keys, message = "Update access keys database") {
-  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, keys, message);
+  const normalized = normalizeAccessKeysDatabase(keys);
+  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, { keys: normalized }, message);
   const f = path.join(DATA, "access-keys.json");
-  return writeJson(f, keys);
+  return writeJson(f, normalized);
 }
 async function findUserById(userId) {
   const users = await readUsers();
@@ -322,48 +344,49 @@ function stopServer(serverId) {
 
   p.stopPromise = new Promise((resolve, reject) => {
     const child = p.child;
-    let finished = false;
-    let timer;
+    let settled = false;
+    let forceTimer;
+    let finalTimer;
 
-    const finish = ok => {
-      if (finished) return;
-      finished = true;
-      if (timer) clearTimeout(timer);
-      if (processes.get(serverId) === p) processes.delete(serverId);
-      ok ? resolve(true) : reject(new Error("Process tidak berhenti dalam waktu yang ditentukan"));
-    };
-
-    const forceStop = () => {
-      try {
-        if (process.platform === "win32") child.kill();
-        else process.kill(-child.pid, "SIGKILL");
-      } catch {}
+    const finish = (ok, error) => {
+      if (settled) return;
+      settled = true;
+      if (forceTimer) clearTimeout(forceTimer);
+      if (finalTimer) clearTimeout(finalTimer);
+      // Never remove a process from the map until the child actually closes.
+      if (ok && processes.get(serverId) === p) processes.delete(serverId);
+      if (ok) resolve(true);
+      else reject(error || new Error("Process masih berjalan; restart dibatalkan agar tidak membuat proses ganda"));
     };
 
     child.once("close", () => finish(true));
     child.once("error", () => finish(true));
 
-    try {
-      // The runtime is spawned as a detached process group on Unix. Killing
-      // the negative PID terminates the shell and the actual runtime child
-      // together, preventing restart from colliding with an old process.
-      if (process.platform === "win32") {
-        child.kill();
-      } else {
-        process.kill(-child.pid, "SIGTERM");
+    const signalGroup = signal => {
+      try {
+        if (process.platform === "win32") child.kill(signal);
+        else process.kill(-child.pid, signal);
+        return true;
+      } catch {
+        try { return child.kill(signal); } catch { return false; }
       }
-    } catch {
-      try { child.kill("SIGTERM"); } catch {}
-    }
+    };
 
-    timer = setTimeout(() => {
-      forceStop();
-      setTimeout(() => finish(false), 1200);
+    signalGroup("SIGTERM");
+
+    forceTimer = setTimeout(() => {
+      if (!settled) signalGroup(process.platform === "win32" ? undefined : "SIGKILL");
     }, 5000);
+
+    // If the runtime is still alive, keep it registered and refuse restart.
+    finalTimer = setTimeout(() => {
+      finish(false, new Error("Runtime belum benar-benar berhenti. Coba STOP lagi sebelum RESTART."));
+    }, 8000);
   });
 
   return p.stopPromise;
 }
+
 
 app.post("/api/auth/register", async (req, res) => {
   return res.status(403).json({ error: "Register publik dinonaktifkan. Hanya akun root/admin yang dapat membuat user baru." });
