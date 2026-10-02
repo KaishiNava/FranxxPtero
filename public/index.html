@@ -56,7 +56,7 @@
   <div class="side-label">NAVIGATION</div>
   <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
   <button class="nav" data-page="servers"><span>02</span> My Servers</button>
-  <div id="rootNav" class="hidden">
+  <div id="rootNav" class="hidden" data-root-nav="true">
     <button class="nav" data-page="profile"><span>03</span> Profile</button>
     <button class="nav" data-page="apiKeys"><span>04</span> API / Access Keys</button>
   </div>
@@ -152,6 +152,6 @@ POST /api/servers</pre><p>Untuk /api/servers dengan access key, kirim <b>userId<
 <div class="ram-input-row"><input id="newMemory" type="number" min="64" max="32768" step="64" value="512" placeholder="512"><span>MB</span></div>
 <div class="preset-row"><button type="button" class="ghost" data-memory="256">256 MB</button><button type="button" class="ghost" data-memory="512">512 MB</button><button type="button" class="ghost" data-memory="1024">1 GB</button><button type="button" class="ghost" data-memory="2048">2 GB</button></div>
 <button class="primary wide" onclick="createServer()">CREATE SERVER</button></div></div>
-<script src="/app.js"></script>
+<script src="/app.js?v=20261002-rootfix2"></script>
 </body>
 </html>

@@ -64,5 +64,21 @@ $("#newRuntime").onchange=()=>{const r=$("#newRuntime").value;if(r==='python'){ 
 $("#modal").addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$("#modal").classList.contains('hidden'))closeModal()});
 $("#authForm").onsubmit=async e=>{e.preventDefault();try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$("#username").value,password:$("#password").value})});const d=await r.json();if(!r.ok)throw Error(d.error||'Gagal login');localStorage.setItem('fx_token',d.token);location.reload()}catch(e){toast(e.message,true)}};
-async function boot(){if(!token){$("#auth").classList.remove('hidden');return}try{me=await api('/api/me');$("#who").textContent='@'+me.username;$("#rootNav").classList.toggle('hidden',!me.root);$("#auth").classList.add('hidden');$("#app").classList.remove('hidden');await loadServers()}catch{$("#auth").classList.remove('hidden');localStorage.removeItem('fx_token');token=null}}
+async function boot(){
+  if(!token){$("#auth").classList.remove('hidden');return}
+  try{
+    me=await api('/api/me');
+    $("#who").textContent='@'+me.username;
+    const rootNav=$("#rootNav");
+    rootNav.classList.toggle('hidden',me.root!==true);
+    rootNav.setAttribute('aria-hidden',me.root===true?'false':'true');
+    $("#auth").classList.add('hidden');
+    $("#app").classList.remove('hidden');
+    await loadServers();
+  }catch(e){
+    $("#auth").classList.remove('hidden');
+    localStorage.removeItem('fx_token');
+    token=null;
+  }
+}
 boot();
