@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#08090c">
+<title>FRANXX PTERO — FX PROJECT</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="toast"></div>
+
+<section id="auth" class="auth">
+  <div class="auth-card">
+    <div class="brand"><span>FX</span> PROJECT</div>
+    <div class="sub">FRANXX PTERO</div>
+    <div class="tabs"><button class="active" data-mode="login">LOGIN</button><button data-mode="register">REGISTER</button></div>
+    <form id="authForm">
+      <input id="username" autocomplete="username" placeholder="Username" required>
+      <input id="password" autocomplete="current-password" type="password" placeholder="Password" required>
+      <button class="primary" type="submit" id="authBtn">LOGIN</button>
+    </form>
+    <small>Private-use lightweight server panel</small>
+  </div>
+</section>
+
+<section id="app" class="hidden">
+<header>
+  <button id="mobileMenu" class="icon">☰</button>
+  <div class="brand"><span>FX</span> PROJECT <i>/ FRANXX PTERO</i></div>
+  <div class="header-right"><b id="who"></b><button id="logout" class="ghost">LOGOUT</button></div>
+</header>
+<div class="layout">
+<aside id="side">
+  <button class="nav active" data-page="dashboard">Dashboard</button>
+  <button class="nav" data-page="servers">My Servers</button>
+  <div class="side-bottom"><span>Private Mode</span><span class="dot"></span></div>
+</aside>
+
+<main>
+<div id="dashboard" class="page">
+  <div class="hero"><div><label>CONTROL PANEL</label><h1>Welcome back.</h1><p>Kelola server dan bot kamu dari satu tempat.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+  <div class="cards">
+    <div class="card"><small>SERVERS</small><strong id="serverCount">0</strong></div>
+    <div class="card"><small>ONLINE</small><strong id="onlineCount">0</strong></div>
+    <div class="card"><small>PLATFORM</small><strong>RAILWAY</strong></div>
+  </div>
+  <div class="section-head"><h2>Recent Servers</h2><button class="ghost" onclick="loadServers()">Refresh</button></div>
+  <div id="recent" class="server-grid"></div>
+</div>
+
+<div id="servers" class="page hidden">
+  <div class="section-head"><div><label>MANAGEMENT</label><h1>My Servers</h1></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
+  <div id="serverGrid" class="server-grid"></div>
+</div>
+
+<div id="serverDetail" class="page hidden">
+  <div class="server-top"><div><button class="back" onclick="showPage('servers')">← Servers</button><label id="detailRuntime"></label><h1 id="detailName">Server</h1><span id="detailStatus" class="status">OFFLINE</span></div>
+  <div class="actions"><button class="primary" id="startBtn">START</button><button class="ghost" id="restartBtn">RESTART</button><button class="danger" id="stopBtn">STOP</button></div></div>
+  <div class="server-tabs"><button class="stab active" data-tab="console">CONSOLE</button><button class="stab" data-tab="files">FILES</button><button class="stab" data-tab="editor">EDITOR</button><button class="stab" data-tab="settings">SETTINGS</button></div>
+  <div id="consoleTab" class="tabpage">
+    <div class="console" id="console"></div>
+    <div class="console-input"><span>›</span><input id="stdin" placeholder="Console input (Enter untuk kirim)" autocomplete="off"></div>
+  </div>
+  <div id="filesTab" class="tabpage hidden"><div class="filebar"><span id="cwd">/</span><button class="ghost" onclick="uploadFiles()">UPLOAD</button><button class="ghost" onclick="newFolder()">NEW FOLDER</button><input type="file" id="fileInput" multiple hidden></div><div id="files" class="filelist"></div></div>
+  <div id="editorTab" class="tabpage hidden"><div class="editorbar"><span id="editing">No file selected</span><button class="primary" onclick="saveFile()">SAVE</button></div><textarea id="editor" spellcheck="false"></textarea></div>
+  <div id="settingsTab" class="tabpage hidden"><div class="settings"><label>COMMAND</label><input id="commandInput"><label>ENTRY FILE</label><input id="entryInput"><button class="primary" onclick="saveSettings()">SAVE SETTINGS</button><hr><button class="danger" onclick="deleteServer()">DELETE SERVER</button></div></div>
+</div>
+</main>
+</div>
+</section>
+
+<div id="modal" class="modal hidden">
+<div class="modal-card"><button class="modal-x" onclick="closeModal()">×</button><h2>Create Server</h2>
+<input id="newName" placeholder="Server name">
+<select id="newRuntime"><option value="node">Node.js</option><option value="python">Python</option><option value="custom">Custom</option></select>
+<input id="newEntry" placeholder="Entry file" value="index.js">
+<input id="newCommand" placeholder="Start command" value="node index.js">
+<button class="primary wide" onclick="createServer()">CREATE</button></div></div>
+<script src="/app.js"></script>
+</body>
+</html>
