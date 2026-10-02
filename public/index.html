@@ -29,7 +29,7 @@
     </div>
     <div class="auth-card">
       <div class="auth-heading"><span>PRIVATE CONTROL</span><h1>Welcome.</h1><p>Kelola server dan bot kamu dari satu tempat.</p></div>
-      <div class="tabs"><button class="active" data-mode="login">LOGIN</button><button data-mode="register">REGISTER</button></div>
+      <div class="tabs"><button class="active" data-mode="login">LOGIN</button></div>
       <form id="authForm">
         <input id="username" autocomplete="username" placeholder="Username" required>
         <input id="password" autocomplete="current-password" type="password" placeholder="Password" required>
@@ -56,6 +56,10 @@
   <div class="side-label">NAVIGATION</div>
   <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
   <button class="nav" data-page="servers"><span>02</span> My Servers</button>
+  <div id="rootNav" class="hidden">
+    <button class="nav" data-page="profile"><span>03</span> Profile</button>
+    <button class="nav" data-page="apiKeys"><span>04</span> API / Access Keys</button>
+  </div>
   <button class="mobile-create" id="addServerMenu" onclick="openCreate();document.getElementById('side').classList.remove('open')"><span>＋</span><div><b>ADD SERVER</b><small>Create a new runtime</small></div></button>
   <div class="side-spacer"></div>
   <div class="side-status"><span class="dot"></span><div><b>Private Mode</b><small>Runtime ready</small></div></div>
@@ -85,6 +89,27 @@
 <div id="servers" class="page hidden">
   <div class="section-head page-heading"><div><label>MANAGEMENT</label><h1>My Servers</h1><p>Semua runtime yang kamu buat ada di sini.</p></div></div>
   <div id="serverGrid" class="server-grid"></div>
+</div>
+
+<div id="profile" class="page hidden root-only">
+  <div class="section-head page-heading"><div><label>ROOT / ADMIN</label><h1>Profile</h1><p>Kelola akun panel dan buat user baru.</p></div></div>
+  <div class="profile-grid">
+    <div class="card profile-card"><div class="profile-kicker">CURRENT ACCOUNT</div><h2 id="profileUsername">@admin</h2><span class="root-badge">ROOT / ADMIN</span><div class="profile-meta"><span>Account ID</span><b id="profileId">-</b></div><div class="profile-meta"><span>Created</span><b id="profileCreated">-</b></div></div>
+    <div class="card admin-form"><div class="profile-kicker">CREATE USER</div><h2>New Panel Account</h2><p>User publik tidak dapat register. Hanya root/admin yang dapat membuat akun.</p><input id="newUserUsername" placeholder="Username" autocomplete="off"><input id="newUserPassword" type="password" placeholder="Password"><label class="check-row"><input id="newUserRoot" type="checkbox"> <span>Jadikan ROOT / ADMIN</span></label><button class="primary wide" onclick="createPanelUser()">CREATE USER</button></div>
+  </div>
+  <div class="section-head"><div><label>ACCOUNTS</label><h2>Panel Users</h2></div></div><div id="userList" class="admin-list"></div>
+</div>
+
+<div id="apiKeys" class="page hidden root-only">
+  <div class="section-head page-heading"><div><label>ROOT / ADMIN</label><h1>API / Access Keys</h1><p>Key rahasia untuk membuat akun dan server melalui API.</p></div><button class="ghost refresh-btn" onclick="loadApiKeys()">↻ <span>Refresh</span></button></div>
+  <div class="profile-grid">
+    <div class="card admin-form"><div class="profile-kicker">CREATE ACCESS KEY</div><h2>New Secret Key</h2><p>Secret hanya ditampilkan sekali. Database hanya menyimpan hash key.</p><input id="keyName" placeholder="Key name, contoh: Bot Provisioner"><label class="scope-title">PERMISSIONS</label><label class="check-row"><input id="scopeUsers" type="checkbox" checked> <span>users:create</span></label><label class="check-row"><input id="scopeServers" type="checkbox" checked> <span>servers:create</span></label><button class="primary wide" onclick="createAccessKey()">CREATE ACCESS KEY</button><div id="newSecretBox" class="secret-box hidden"><small>SHOW ONCE — SIMPAN DI TEMPAT AMAN</small><code id="newSecret"></code><button class="ghost" onclick="copySecret()">COPY KEY</button></div></div>
+    <div class="card api-info"><div class="profile-kicker">API USAGE</div><h2>Provisioning</h2><pre>Authorization: Bearer fx_live_...
+
+POST /api/access/users
+POST /api/servers</pre><p>Untuk /api/servers dengan access key, kirim <b>userId</b> pada body. Root tidak dapat dibuat melalui API key.</p></div>
+  </div>
+  <div class="section-head"><div><label>KEYS</label><h2>Active & Revoked Keys</h2></div></div><div id="keyList" class="admin-list"></div>
 </div>
 
 <div id="serverDetail" class="page hidden">
