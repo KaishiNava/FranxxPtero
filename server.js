@@ -37,11 +37,16 @@ app.use(express.static(path.join(__dirname, "public")));
 const upload = multer({
   storage: multer.diskStorage({
     destination(req, file, cb) {
-      try {
-        const dir = safeServerPath(req.user.id, req.params.id, req.query.path || "");
-        fs.mkdirSync(dir, { recursive: true });
-        cb(null, dir);
-      } catch (e) { cb(e); }
+      getOwnedServer(req.user.id, req.params.id)
+        .then(ownerServer => {
+          if (!ownerServer) return cb(new Error("Server tidak ditemukan"));
+          try {
+            const dir = safeServerPath(req.user.id, req.params.id, req.query.path || "");
+            fs.mkdirSync(dir, { recursive: true });
+            cb(null, dir);
+          } catch (e) { cb(e); }
+        })
+        .catch(e => cb(e));
     },
     filename(req, file, cb) {
       cb(null, path.basename(file.originalname));

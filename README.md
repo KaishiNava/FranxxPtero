@@ -37,3 +37,11 @@ npm start
 ```
 
 Set `JWT_SECRET` in production. Optional upload limit can be changed with `MAX_UPLOAD_MB`.
+
+
+## V2 UI / account isolation
+- Create Server is accessed from the ☰ sidebar.
+- Dashboard no longer shows a Create Server button.
+- Header branding stays left-aligned on Android/mobile.
+- Every server has an ownerId and all server/file/runtime APIs verify ownership.
+- Upload storage also verifies server ownership before writing files.
