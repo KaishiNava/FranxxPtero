@@ -56,6 +56,7 @@
   <div class="side-label">NAVIGATION</div>
   <button class="nav active" data-page="dashboard"><span>01</span> Dashboard</button>
   <button class="nav" data-page="servers"><span>02</span> My Servers</button>
+  <button class="mobile-create" onclick="openCreate();document.getElementById('side').classList.remove('open')"><span>＋</span><div><b>ADD SERVER</b><small>Create a new runtime</small></div></button>
   <div class="side-spacer"></div>
   <div class="side-status"><span class="dot"></span><div><b>Private Mode</b><small>Runtime ready</small></div></div>
 </aside>
@@ -63,13 +64,21 @@
 <main>
 <div id="dashboard" class="page">
   <section class="top-banner" aria-label="FRANXX PTERO banner"><img src="https://zfile.web.id/ptVnzVN.png" alt="FRANXX PTERO banner"><div class="banner-shade"></div><div class="banner-content"><span>FRANXX PTERO</span><b>CONTROL YOUR<br>RUNTIME.</b><small>Simple. Fast. Yours.</small></div></section>
-  <div class="hero"><div><label>CONTROL PANEL</label><h1>Welcome back.</h1><p>Kelola server, bot, files, runtime dan console dari satu tempat.</p></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
-  <div class="cards">
-    <div class="card stat-card"><div class="stat-icon">SV</div><small>SERVERS</small><strong id="serverCount">0</strong><span>Total server kamu</span></div>
-    <div class="card stat-card"><div class="stat-icon live">●</div><small>ONLINE</small><strong id="onlineCount">0</strong><span>Runtime aktif</span></div>
-    <div class="card stat-card"><div class="stat-icon">FX</div><small>PLATFORM</small><strong>RAILWAY</strong><span>Deployment ready</span></div>
+  <div class="hero hero-new">
+    <div class="hero-copy">
+      <div class="eyebrow"><span></span> CONTROL PANEL <em>•</em> ONLINE</div>
+      <h1>Welcome back<span>.</span></h1>
+      <p>Kelola server, bot, files, runtime dan console dari satu tempat.</p>
+      <div class="hero-chips"><span>REAL-TIME CONSOLE</span><span>FILE MANAGER</span><span>RESOURCE MONITOR</span></div>
+    </div>
+    <div class="hero-action"><div class="hero-orb"><img src="https://zfile.web.id/PBe7sdw.png" alt=""></div><button class="primary" onclick="openCreate()">+ CREATE SERVER</button></div>
   </div>
-  <div class="section-head"><div><label>OVERVIEW</label><h2>Recent Servers</h2></div><button class="ghost" onclick="loadServers()">↻ Refresh</button></div>
+  <div class="cards cards-new">
+    <div class="card stat-card"><div class="stat-top"><span class="stat-icon">SV</span><small>SERVERS</small></div><strong id="serverCount">0</strong><span>Total server kamu</span><div class="stat-line"><i></i></div></div>
+    <div class="card stat-card"><div class="stat-top"><span class="stat-icon live">●</span><small>ONLINE</small></div><strong id="onlineCount">0</strong><span>Runtime aktif sekarang</span><div class="stat-line live-line"><i></i></div></div>
+    <div class="card stat-card platform-card"><div class="stat-top"><span class="stat-icon">FX</span><small>PLATFORM</small></div><strong>RAILWAY</strong><span>Deployment ready</span><div class="platform-mark">FRANXX <b>PTERO</b></div></div>
+  </div>
+  <div class="section-head"><div><label>OVERVIEW</label><h2>Recent Servers</h2><p class="section-sub">Runtime terakhir yang kamu akses.</p></div><button class="ghost refresh-btn" onclick="loadServers()">↻ <span>Refresh</span></button></div>
   <div id="recent" class="server-grid"></div>
 </div>
 
@@ -109,7 +118,7 @@
 </section>
 
 <div id="modal" class="modal hidden">
-<div class="modal-card"><button class="modal-x" onclick="closeModal()">×</button><div class="modal-brand"><img src="https://zfile.web.id/PBe7sdw.png" alt=""><div><span>FRANXX PTERO</span><b>CREATE SERVER</b></div></div>
+<div class="modal-card"><div class="modal-glow"></div><button class="modal-x" onclick="closeModal()">×</button><div class="modal-brand"><img src="https://zfile.web.id/PBe7sdw.png" alt=""><div><span>FRANXX PTERO</span><b>CREATE SERVER</b></div></div>
 <input id="newName" placeholder="Server name">
 <select id="newRuntime"><option value="node">Node.js</option><option value="python">Python</option><option value="custom">Custom</option></select>
 <input id="newEntry" placeholder="Entry file" value="index.js">
