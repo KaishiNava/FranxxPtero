@@ -10,20 +10,26 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { spawn } = require("child_process");
 const os = require("os");
-const dns = require("dns").promises;
 const net = require("net");
 const AdmZip = require("adm-zip");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
-// Persistent Railway Volume. Mount a Railway Volume at /data and keep DATA_DIR=/data.
-const DATA = path.resolve(process.env.DATA_DIR || path.join(__dirname, "data"));
-const SERVERS_DIR = path.join(DATA, "servers");
-// GitHub users.json is root/admin only. Railway volume users.json is non-root only.
-const USERS_FILE = path.resolve(process.env.LOCAL_USERS_PATH || path.join(DATA, "database", "users.json"));
+
+// Railway Persistent Volume. Set DATA_DIR=/data and mount the Railway
+// Volume at /data. The old /app/data path is intentionally not used when
+// DATA_DIR is configured.
+const DATA = path.resolve(process.env.DATA_DIR || "/data");
+const SERVERS_DIR = path.resolve(process.env.SERVERS_DIR || path.join(DATA, "servers"));
+const LOCAL_USERS_FILE = path.resolve(process.env.LOCAL_USERS_PATH || path.join(DATA, "database", "users.json"));
 const SERVERS_FILE = path.resolve(process.env.LOCAL_SERVERS_PATH || path.join(DATA, "database", "servers.json"));
+const ACCESS_KEYS_FILE = path.resolve(process.env.LOCAL_KEYS_PATH || path.join(DATA, "database", "access-keys.json"));
+const USERS_FILE = LOCAL_USERS_FILE;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex");
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 100);
+const PANEL_URL = String(process.env.PANEL_URL || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+const RUNTIME_PORT_START = Math.max(1024, Number(process.env.RUNTIME_PORT_START || 10000));
+const RUNTIME_PORT_END = Math.max(RUNTIME_PORT_START + 1, Number(process.env.RUNTIME_PORT_END || 20000));
 
 // Account + access-key database. When GitHub is configured, these JSON files
 // are the source of truth; local files remain as a safe development fallback.
@@ -36,6 +42,7 @@ const GITHUB_KEYS_PATH = process.env.GITHUB_KEYS_PATH || "database/access-keys.j
 const ROOT_USERNAME = String(process.env.ROOT_USERNAME || "admin").trim().toLowerCase();
 const ROOT_PASSWORD = String(process.env.ROOT_PASSWORD || "");
 const GITHUB_ENABLED = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+if (!process.env.JWT_SECRET) console.warn("[security] JWT_SECRET belum diset; set JWT_SECRET di Railway Variables untuk token login yang persisten.");
 
 function githubHeaders() {
   return {
@@ -77,101 +84,146 @@ async function githubWriteJson(filePath, data, message) {
     throw new Error(d.message || `GitHub database write failed (${r.status})`);
   }
 }
-function unwrapUsers(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.users)) return data.users;
-  return [];
+function normalizeUsersDatabase(value) {
+  const list = Array.isArray(value) ? value : (value && Array.isArray(value.users) ? value.users : []);
+  return list.filter(Boolean).map(u => {
+    const username = String(u.username || '').trim().toLowerCase();
+    // Accept the simple USERNAME/PASSWORD/ROOT shape requested for the GitHub
+    // database. A missing id is filled deterministically from the username so
+    // JWT/session lookups still work even before the account is rewritten.
+    const stableId = u.id || (username ? `usr_${crypto.createHash('sha256').update(username).digest('hex').slice(0,14)}` : id('usr'));
+    return { ...u, id: stableId, username };
+  }).filter(u => u.username);
 }
-function unwrapKeys(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.keys)) return data.keys;
+function normalizeAccessKeysDatabase(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.keys)) return value.keys;
   return [];
 }
 async function readRootUsers() {
-  if (GITHUB_ENABLED) return unwrapUsers(await githubReadJson(GITHUB_USERS_PATH, { users: [] }));
-  return unwrapUsers(await readJson(USERS_FILE));
+  const list = GITHUB_ENABLED
+    ? normalizeUsersDatabase(await githubReadJson(GITHUB_USERS_PATH, { users: [] }))
+    : normalizeUsersDatabase(await readJson(LOCAL_USERS_FILE));
+
+  // GitHub database/users.json is ROOT ONLY. The configured root username is
+  // also authoritative so an older record without root:true can be repaired.
+  return list.filter(u => Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME);
 }
-async function writeRootUsers(users, message = "Update root users database") {
-  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_USERS_PATH, { users }, message);
-  const locals = await readLocalUsers();
-  return writeJson(USERS_FILE, { users: [...locals.filter(u => !u.root), ...users.filter(u => Boolean(u.root))] });
-}
+
 async function readLocalUsers() {
-  return unwrapUsers(await readJson(USERS_FILE));
+  // Railway Volume users.json is NON-ROOT ONLY. Never let an accidental root
+  // record in the local file override the GitHub root database.
+  const list = normalizeUsersDatabase(await readJson(LOCAL_USERS_FILE));
+  return list.filter(u => !u.root && String(u.username).toLowerCase() !== ROOT_USERNAME);
 }
-async function writeLocalUsers(users) {
-  return writeJson(USERS_FILE, { users });
-}
+
 async function readUsers() {
-  const [roots, locals] = await Promise.all([readRootUsers(), readLocalUsers()]);
-  return [...roots.filter(u => Boolean(u.root)), ...locals.filter(u => !u.root)];
+  const roots = await readRootUsers();
+  const locals = await readLocalUsers();
+  const byUsername = new Map();
+  // GitHub/root records win when the same username exists in an old local file.
+  for (const u of [...locals, ...roots]) byUsername.set(u.username, u);
+  return [...byUsername.values()];
 }
+
+async function writeUsers(users, message = "Update users database") {
+  const normalized = normalizeUsersDatabase(users);
+  if (!GITHUB_ENABLED) return writeJson(LOCAL_USERS_FILE, normalized);
+
+  // GitHub database/users.json is ROOT ONLY. Normal users live on the Railway
+  // Persistent Volume and therefore survive deployments without touching GitHub.
+  const roots = normalized.filter(u => Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME);
+  const locals = normalized.filter(u => !roots.some(r => r.id === u.id || r.username === u.username));
+
+  await githubWriteJson(GITHUB_USERS_PATH, { users: roots }, message);
+  await writeJson(LOCAL_USERS_FILE, locals);
+}
+
 async function readAccessKeys() {
-  if (GITHUB_ENABLED) return unwrapKeys(await githubReadJson(GITHUB_KEYS_PATH, { keys: [] }));
-  const f = path.join(DATA, "access-keys.json");
-  if (!fs.existsSync(f)) await writeJson(f, { keys: [] });
-  return unwrapKeys(await readJson(f));
+  if (GITHUB_ENABLED) {
+    const raw = await githubReadJson(GITHUB_KEYS_PATH, { keys: [] });
+    return normalizeAccessKeysDatabase(raw);
+  }
+  if (!fs.existsSync(ACCESS_KEYS_FILE)) await writeJson(ACCESS_KEYS_FILE, []);
+  return normalizeAccessKeysDatabase(await readJson(ACCESS_KEYS_FILE));
 }
 async function writeAccessKeys(keys, message = "Update access keys database") {
-  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, { keys }, message);
-  const f = path.join(DATA, "access-keys.json");
-  return writeJson(f, { keys });
+  const normalized = normalizeAccessKeysDatabase(keys);
+  if (GITHUB_ENABLED) return githubWriteJson(GITHUB_KEYS_PATH, { keys: normalized }, message);
+  return writeJson(ACCESS_KEYS_FILE, normalized);
 }
 async function findUserById(userId) {
   const users = await readUsers();
   return users.find(u => u.id === userId) || null;
 }
 async function ensureRootAccount() {
-  const roots = (await readRootUsers()).filter(u => Boolean(u.root));
-  if (roots.length) return roots;
-  if (!ROOT_PASSWORD) {
-    if (GITHUB_ENABLED) throw new Error("Database root kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
-    return roots;
+  const users = await readUsers();
+  const rootName = ROOT_USERNAME || "admin";
+
+  // Always treat the configured ROOT_USERNAME as the primary root account.
+  // This also repairs older databases where the account existed but root was
+  // missing/false, which previously caused the Profile/API menu to disappear.
+  const existingRoot = users.find(u => String(u.username || "").toLowerCase() === rootName);
+  if (existingRoot) {
+    let changed = false;
+    if (existingRoot.root !== true) { existingRoot.root = true; changed = true; }
+    if (!existingRoot.createdAt) { existingRoot.createdAt = new Date().toISOString(); changed = true; }
+    if (changed) await writeUsers(users, "Repair configured root account");
+    return users;
   }
-  const root = { id: id("usr"), username: ROOT_USERNAME || "admin", password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
-  await writeRootUsers([root], "Create initial root account");
-  return [root];
+
+  // If the configured root account is missing, create it even when normal
+  // users already exist. The previous implementation stopped when `users`
+  // was non-empty, which meant ROOT_USERNAME/ROOT_PASSWORD could never
+  // bootstrap the admin account after a normal user had been created.
+  if (!ROOT_PASSWORD) {
+    if (GITHUB_ENABLED && !users.length) throw new Error("Database user kosong. Set ROOT_USERNAME dan ROOT_PASSWORD untuk membuat akun root pertama.");
+    return users;
+  }
+  const root = { id: id("usr"), username: rootName, password: await bcrypt.hash(ROOT_PASSWORD, 12), root: true, createdAt: new Date().toISOString() };
+  const nextUsers = [...users, root];
+  await writeUsers(nextUsers, "Create configured root account");
+  return nextUsers;
 }
 
-for (const p of [DATA, SERVERS_DIR, path.dirname(USERS_FILE), path.dirname(SERVERS_FILE)]) fs.mkdirSync(p, { recursive: true });
-if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, JSON.stringify({ users: [] }, null, 2));
+for (const p of [
+  DATA,
+  SERVERS_DIR,
+  path.dirname(LOCAL_USERS_FILE),
+  path.dirname(SERVERS_FILE),
+  path.dirname(ACCESS_KEYS_FILE)
+]) fs.mkdirSync(p, { recursive: true });
+if (!fs.existsSync(LOCAL_USERS_FILE)) fs.writeFileSync(LOCAL_USERS_FILE, "[]");
 if (!fs.existsSync(SERVERS_FILE)) fs.writeFileSync(SERVERS_FILE, "[]");
-const ACCESS_KEYS_FILE = path.join(DATA, "access-keys.json");
-if (!fs.existsSync(ACCESS_KEYS_FILE)) fs.writeFileSync(ACCESS_KEYS_FILE, JSON.stringify({ keys: [] }, null, 2));
+if (!fs.existsSync(ACCESS_KEYS_FILE)) fs.writeFileSync(ACCESS_KEYS_FILE, "[]");
 
-// One-time migration from the older layout (DATA/servers.json + DATA/servers).
-const LEGACY_SERVERS_FILE = path.join(DATA, "servers.json");
-const LEGACY_SERVERS_DIR = path.join(DATA, "servers");
-try {
-  const legacyText = LEGACY_SERVERS_FILE !== SERVERS_FILE && fs.existsSync(LEGACY_SERVERS_FILE) ? fs.readFileSync(LEGACY_SERVERS_FILE, "utf8") : "[]";
-  const legacyData = JSON.parse(legacyText || "[]");
-  const currentData = JSON.parse(fs.readFileSync(SERVERS_FILE, "utf8") || "[]");
-  if (Array.isArray(legacyData) && legacyData.length && Array.isArray(currentData) && !currentData.length) {
-    fs.writeFileSync(SERVERS_FILE, JSON.stringify(legacyData, null, 2));
-  }
-} catch {}
-if (LEGACY_SERVERS_DIR !== SERVERS_DIR && fs.existsSync(LEGACY_SERVERS_DIR)) {
+// Migrate the previous ephemeral /app/data layout once, if it still exists.
+// This is useful when an older Railway deployment used /app/data as its
+// volume mount. New writes always go to DATA (/data).
+const LEGACY_DATA = path.resolve(__dirname, "data");
+if (LEGACY_DATA !== DATA && fs.existsSync(LEGACY_DATA)) {
   try {
-    const currentEntries = fs.readdirSync(SERVERS_DIR);
-    const legacyEntries = fs.readdirSync(LEGACY_SERVERS_DIR);
-    if (!currentEntries.length && legacyEntries.length) {
-      for (const name of legacyEntries) {
-        fs.cpSync(path.join(LEGACY_SERVERS_DIR, name), path.join(SERVERS_DIR, name), { recursive: true, force: false });
+    const legacyDb = path.join(LEGACY_DATA, "database");
+    const newDb = path.dirname(SERVERS_FILE);
+    fs.mkdirSync(newDb, { recursive: true });
+    for (const name of ["users.json", "servers.json"]) {
+      const from = path.join(legacyDb, name);
+      const to = path.join(newDb, name);
+      if (fs.existsSync(from) && (!fs.existsSync(to) || fs.statSync(to).size <= 2)) fs.copyFileSync(from, to);
+    }
+    const legacyServers = path.join(LEGACY_DATA, "servers");
+    if (fs.existsSync(legacyServers)) {
+      fs.mkdirSync(SERVERS_DIR, { recursive: true });
+      for (const name of fs.readdirSync(legacyServers)) {
+        const from = path.join(legacyServers, name);
+        const to = path.join(SERVERS_DIR, name);
+        if (!fs.existsSync(to)) fs.cpSync(from, to, { recursive: true });
       }
     }
-  } catch {}
-}
-
-async function migrateLegacyGithubUsers() {
-  if (!GITHUB_ENABLED) return;
-  const githubUsers = await readRootUsers();
-  const legacyNormal = githubUsers.filter(u => !u.root);
-  if (!legacyNormal.length) return;
-  const locals = await readLocalUsers();
-  const known = new Set(locals.map(u => u.id));
-  for (const u of legacyNormal) if (!known.has(u.id)) locals.push({ ...u, root: false });
-  await writeLocalUsers(locals);
-  await writeRootUsers(githubUsers.filter(u => Boolean(u.root)), "Move non-root users to Railway persistent database");
+    console.log(`[storage] legacy data migration checked: ${LEGACY_DATA} -> ${DATA}`);
+  } catch (e) {
+    console.warn(`[storage] legacy migration failed: ${e.message}`);
+  }
 }
 
 const app = express();
@@ -181,7 +233,18 @@ const processes = new Map();
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
+// Always serve the panel shell/assets fresh after a Railway deployment.
+// This prevents an old cached app.js from hiding the root navigation after
+// the backend has already been updated.
+app.use((req, res, next) => {
+  if (req.path === "/" || req.path === "/index.html" || req.path === "/app.js" || req.path === "/style.css") {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname, "public"), { etag: false, lastModified: false }));
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -250,9 +313,15 @@ function publicServer(s) {
     id: s.id, name: s.name, runtime: s.runtime, entry: s.entry,
     command: s.command, memoryLimit: Number(s.memoryLimit || 512),
     createdAt: s.createdAt,
-    status: s.suspended ? "suspended" : (processes.has(s.id) ? "online" : "offline"),
     suspended: Boolean(s.suspended),
-    web: { url: s.webUrl || null, port: s.webPort || null }
+    suspendedAt: s.suspendedAt || null,
+    suspendedReason: s.suspendedReason || null,
+    status: processes.has(s.id) ? "online" : "offline",
+    runtimePort: Number(s.runtimePort || runtimePortForServer(s)),
+    runtimeOnline: isServerOnline(s.id),
+    runtimeWeb: runtimeWebUrl(s),
+    runtimeUrl: runtimeWebUrl(s),
+    pingUrl: runtimePingUrl(s)
   };
 }
 
@@ -276,6 +345,78 @@ async function directorySize(dir) {
     }
   }
   return total;
+}
+
+function runtimePortForServer(s, servers = []) {
+  const existing = Number(s.runtimePort);
+  if (existing >= RUNTIME_PORT_START && existing <= RUNTIME_PORT_END) return existing;
+
+  const range = RUNTIME_PORT_END - RUNTIME_PORT_START + 1;
+  let port = RUNTIME_PORT_START + (parseInt(crypto.createHash("sha256").update(String(s.id)).digest("hex").slice(0, 8), 16) % range);
+  const used = new Set(servers.map(x => Number(x.runtimePort)).filter(Number.isFinite));
+  for (let i = 0; i < range; i++) {
+    if (!used.has(port)) return port;
+    port++;
+    if (port > RUNTIME_PORT_END) port = RUNTIME_PORT_START;
+  }
+  return RUNTIME_PORT_START;
+}
+
+function publicBaseUrl() {
+  if (PANEL_URL) return PANEL_URL;
+  const domain = String(process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL || "").trim().replace(/\/$/, "");
+  if (domain) return domain.startsWith("http://") || domain.startsWith("https://") ? domain : `https://${domain}`;
+  return `http://localhost:${PORT}`;
+}
+
+function runtimeWebUrl(s) {
+  return `${publicBaseUrl()}/runtime/${encodeURIComponent(s.id)}/`;
+}
+
+function runtimePingUrl(s) {
+  return `${publicBaseUrl()}/api/runtime/${encodeURIComponent(s.id)}/ping`;
+}
+
+function runtimeState(s) {
+  const p = processes.get(s.id);
+  return {
+    port: Number(s.runtimePort || runtimePortForServer(s)),
+    web: runtimeWebUrl(s),
+    url: runtimeWebUrl(s),
+    ping: runtimePingUrl(s),
+    pingUrl: runtimePingUrl(s),
+    online: Boolean(p),
+    status: p ? "online" : "offline"
+  };
+}
+
+function pingLocalRuntime(port, pathname = "/") {
+  return new Promise(resolve => {
+    const started = Date.now();
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port,
+      path: pathname || "/",
+      method: "GET",
+      timeout: 2500,
+      headers: { "User-Agent": "FRANXX-PTERO-Runtime-Ping" }
+    }, response => {
+      response.resume();
+      response.on("end", () => resolve({
+        ok: response.statusCode >= 200 && response.statusCode < 500,
+        status: response.statusCode || 0,
+        responseTimeMs: Date.now() - started
+      }));
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", error => resolve({
+      ok: false,
+      status: 0,
+      responseTimeMs: Date.now() - started,
+      error: error.code || error.message
+    }));
+    req.end();
+  });
 }
 
 function readProcessStats(pid) {
@@ -341,14 +482,20 @@ wss.on("connection", async (ws, req) => {
 });
 
 function runServer(s) {
+  if (s.suspended) throw new Error("Server sedang disuspend");
   if (processes.has(s.id)) throw new Error("Server already running");
   const cwd = serverRoot(s.id);
   fs.mkdirSync(cwd, { recursive: true });
 
+  const runtimePort = Number(s.runtimePort || runtimePortForServer(s));
+  s.runtimePort = runtimePort;
+
   // Private-use panel: commands are intentionally configurable per server.
+  // PORT/FX_RUNTIME_PORT are injected so web runtimes can bind to the
+  // dedicated reverse-proxy port exposed by the panel.
   const child = spawn(s.command, {
     cwd,
-    env: { ...process.env, ...(s.env || {}), FX_SERVER_ID: s.id },
+    env: { ...process.env, ...(s.env || {}), FX_SERVER_ID: s.id, PORT: String(runtimePort), FX_RUNTIME_PORT: String(runtimePort) },
     shell: true,
     windowsHide: true,
     detached: process.platform !== "win32"
@@ -384,48 +531,49 @@ function stopServer(serverId) {
 
   p.stopPromise = new Promise((resolve, reject) => {
     const child = p.child;
-    let finished = false;
-    let timer;
+    let settled = false;
+    let forceTimer;
+    let finalTimer;
 
-    const finish = ok => {
-      if (finished) return;
-      finished = true;
-      if (timer) clearTimeout(timer);
-      if (processes.get(serverId) === p) processes.delete(serverId);
-      ok ? resolve(true) : reject(new Error("Process tidak berhenti dalam waktu yang ditentukan"));
-    };
-
-    const forceStop = () => {
-      try {
-        if (process.platform === "win32") child.kill();
-        else process.kill(-child.pid, "SIGKILL");
-      } catch {}
+    const finish = (ok, error) => {
+      if (settled) return;
+      settled = true;
+      if (forceTimer) clearTimeout(forceTimer);
+      if (finalTimer) clearTimeout(finalTimer);
+      // Never remove a process from the map until the child actually closes.
+      if (ok && processes.get(serverId) === p) processes.delete(serverId);
+      if (ok) resolve(true);
+      else reject(error || new Error("Process masih berjalan; restart dibatalkan agar tidak membuat proses ganda"));
     };
 
     child.once("close", () => finish(true));
     child.once("error", () => finish(true));
 
-    try {
-      // The runtime is spawned as a detached process group on Unix. Killing
-      // the negative PID terminates the shell and the actual runtime child
-      // together, preventing restart from colliding with an old process.
-      if (process.platform === "win32") {
-        child.kill();
-      } else {
-        process.kill(-child.pid, "SIGTERM");
+    const signalGroup = signal => {
+      try {
+        if (process.platform === "win32") child.kill(signal);
+        else process.kill(-child.pid, signal);
+        return true;
+      } catch {
+        try { return child.kill(signal); } catch { return false; }
       }
-    } catch {
-      try { child.kill("SIGTERM"); } catch {}
-    }
+    };
 
-    timer = setTimeout(() => {
-      forceStop();
-      setTimeout(() => finish(false), 1200);
+    signalGroup("SIGTERM");
+
+    forceTimer = setTimeout(() => {
+      if (!settled) signalGroup(process.platform === "win32" ? undefined : "SIGKILL");
     }, 5000);
+
+    // If the runtime is still alive, keep it registered and refuse restart.
+    finalTimer = setTimeout(() => {
+      finish(false, new Error("Runtime belum benar-benar berhenti. Coba STOP lagi sebelum RESTART."));
+    }, 8000);
   });
 
   return p.stopPromise;
 }
+
 
 app.post("/api/auth/register", async (req, res) => {
   return res.status(403).json({ error: "Register publik dinonaktifkan. Hanya akun root/admin yang dapat membuat user baru." });
@@ -437,67 +585,227 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const users = await ensureRootAccount();
     const user = users.find(u => u.username === username);
-    if (!user || !(await bcrypt.compare(password, user.password || user.passwordHash || "")))
-      return res.status(401).json({ error: "Username atau password salah" });
-    const token = jwt.sign({ id: user.id, username }, JWT_SECRET, { expiresIn: "30d" });
-    res.json({ token, user: { id: user.id, username, root: Boolean(user.root) } });
+    let valid = false;
+    const stored = String(user?.password || user?.passwordHash || "");
+    if (user && stored) {
+      // Accept legacy plaintext entries only long enough to migrate them to
+      // bcrypt after a successful login. New accounts are always hashed.
+      if (stored.startsWith("$2")) valid = await bcrypt.compare(password, stored);
+      else valid = stored === password;
+    }
+    if (!user || !valid) return res.status(401).json({ error: "Username atau password salah" });
+
+    if (!stored.startsWith("$2")) {
+      user.password = await bcrypt.hash(password, 12);
+      delete user.passwordHash;
+      await writeUsers(users, `Migrate password for ${username}`);
+    }
+
+    const root = Boolean(user.root) || username === ROOT_USERNAME;
+    if (root && !user.root) { user.root = true; await writeUsers(users, `Repair root flag for ${username}`); }
+    const token = jwt.sign({ id: user.id, username, root }, JWT_SECRET, { expiresIn: "30d" });
+    res.json({ token, user: { id: user.id, username, root } });
   } catch (e) {
     res.status(500).json({ error: e.message || "Database akun tidak tersedia" });
   }
 });
 
 app.get("/api/me", auth, async (req, res) => {
-  const user = await findUserById(req.user.id);
+  const users = await readUsers();
+  const user = users.find(u => String(u.id) === String(req.user.id));
   if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
-  res.json({ id: user.id, username: user.username, root: Boolean(user.root), createdAt: user.createdAt });
+
+  const root = Boolean(user.root) || String(user.username).toLowerCase() === ROOT_USERNAME;
+  if (root && !user.root) {
+    user.root = true;
+    try { await writeUsers(users, `Repair root flag for ${user.username}`); } catch (e) {
+      console.warn("[root] gagal menyimpan root flag:", e.message);
+    }
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ id: user.id, username: user.username, root, createdAt: user.createdAt });
 });
 
 function rootAuth(req, res, next) {
-  findUserById(req.user.id).then(user => {
+  findUserById(req.user.id).then(async user => {
     if (!user) return res.status(401).json({ error: "Akun tidak ditemukan" });
-    if (!user.root) return res.status(403).json({ error: "Akses root/admin diperlukan" });
+    // The configured ROOT_USERNAME is authoritative. This makes admin access
+    // survive older GitHub records that have root:false or lack the flag.
+    const configuredRoot = String(user.username || "").toLowerCase() === ROOT_USERNAME;
+    if (!user.root && !configuredRoot) return res.status(403).json({ error: "Akses root/admin diperlukan" });
+    if (configuredRoot && !user.root) {
+      user.root = true;
+      try {
+        const users = await readUsers();
+        const found = users.find(u => u.id === user.id || u.username === user.username);
+        if (found) found.root = true;
+        await writeUsers(users, `Repair root flag for ${user.username}`);
+      } catch (e) {
+        // Do not block the configured root account just because a GitHub write
+        // is temporarily unavailable; access is still authorized by username.
+        console.warn("[root] gagal menyimpan root flag:", e.message);
+      }
+    }
     req.account = user;
     next();
   }).catch(e => res.status(500).json({ error: e.message }));
 }
 
+// ============================================================
+// FRANXX PTERO — FULL ACCESS-KEY API
+// API keys can provision users/servers and manage all servers.
+// The first/root admin server is protected from deletion.
+// ============================================================
 const API_SCOPES = [
-  "users:create", "users:read", "users:delete",
-  "servers:create", "servers:read", "servers:manage", "servers:delete",
-  "stats:read", "web:ping"
+  "users:create",
+  "users:read",
+  "users:delete",
+  "servers:create",
+  "servers:read",
+  "servers:start",
+  "servers:stop",
+  "servers:restart",
+  "servers:suspend",
+  "servers:unsuspend",
+  "servers:delete",
+  "servers:stats"
 ];
+
 function normalizeScopes(scopes) {
-  const allowed = new Set(API_SCOPES);
-  return [...new Set((Array.isArray(scopes) ? scopes : []).map(String).filter(x => allowed.has(x)))];
+  const incoming = Array.isArray(scopes) ? scopes.map(String) : [];
+  const valid = incoming.filter(x => API_SCOPES.includes(x));
+
+  // Backward compatibility: the old API-key screen only created
+  // users:create + servers:create. Treat that legacy pair as a full
+  // management key so existing tokens keep working after this update.
+  if (valid.includes("users:create") && valid.includes("servers:create")) {
+    return [...API_SCOPES];
+  }
+
+  return [...new Set(valid)];
 }
+
+function effectiveApiKeyScopes(key) {
+  const scopes = normalizeScopes(key?.scopes);
+  return scopes;
+}
+
 function hashAccessKey(secret) {
   return crypto.createHash("sha256").update(secret).digest("hex");
 }
+
 function apiKeyAuth(req, res, next) {
   (async () => {
     const h = req.headers.authorization || "";
-    if (!h.startsWith("Bearer ")) return res.status(401).json({ error: "Access key diperlukan" });
+    if (!h.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access key diperlukan" });
+    }
+
     const secret = h.slice(7).trim();
-    if (!secret.startsWith("fx_live_")) return res.status(401).json({ error: "Access key tidak valid" });
+    if (!secret.startsWith("fx_live_")) {
+      return res.status(401).json({ error: "Access key tidak valid" });
+    }
+
     const keys = await readAccessKeys();
     const hash = hashAccessKey(secret);
     const key = keys.find(k => {
       if (k.revokedAt || typeof k.keyHash !== "string" || k.keyHash.length !== hash.length) return false;
-      return crypto.timingSafeEqual(Buffer.from(k.keyHash), Buffer.from(hash));
+      try {
+        return crypto.timingSafeEqual(Buffer.from(k.keyHash), Buffer.from(hash));
+      } catch {
+        return false;
+      }
     });
-    if (!key) return res.status(401).json({ error: "Access key tidak valid atau sudah direvoke" });
-    req.apiKey = key;
+
+    if (!key) {
+      return res.status(401).json({ error: "Access key tidak valid atau sudah direvoke" });
+    }
+
+    // Do not expose the raw key or hash to route handlers.
+    req.apiKey = {
+      id: key.id,
+      name: key.name,
+      ownerId: key.ownerId,
+      scopes: effectiveApiKeyScopes(key)
+    };
+
     next();
   })().catch(e => res.status(500).json({ error: e.message || "Access key database error" }));
 }
+
 function requireScope(scope) {
   return (req, res, next) => {
-    if (!req.apiKey || !req.apiKey.scopes.includes(scope)) return res.status(403).json({ error: `Scope ${scope} diperlukan` });
+    if (!req.apiKey || !req.apiKey.scopes.includes(scope)) {
+      return res.status(403).json({ error: `Scope ${scope} diperlukan` });
+    }
     next();
   };
 }
 
+async function getAllServers() {
+  return readJson(SERVERS_FILE);
+}
+
+async function getAllUsersForApi() {
+  return readUsers();
+}
+
+function isServerOnline(serverId) {
+  return processes.has(serverId);
+}
+
+function rootAccountForProtection(users) {
+  const rootName = ROOT_USERNAME.toLowerCase();
+  return users.find(u => String(u.username || "").toLowerCase() === rootName)
+    || users.find(u => u.root === true)
+    || null;
+}
+
+function protectedRootServerId(servers, users) {
+  const root = rootAccountForProtection(users);
+  if (!root) return null;
+
+  const owned = servers
+    .filter(s => String(s.ownerId) === String(root.id))
+    .sort((a, b) => {
+      const aa = new Date(a.createdAt || 0).getTime();
+      const bb = new Date(b.createdAt || 0).getTime();
+      return aa - bb || String(a.id).localeCompare(String(b.id));
+    });
+
+  return owned[0]?.id || null;
+}
+
+function apiServerView(server, users, protectedId) {
+  const owner = users.find(u => String(u.id) === String(server.ownerId));
+  return {
+    id: server.id,
+    name: server.name,
+    ownerId: server.ownerId,
+    owner: owner ? {
+      id: owner.id,
+      username: owner.username,
+      root: Boolean(owner.root) || String(owner.username).toLowerCase() === ROOT_USERNAME.toLowerCase()
+    } : null,
+    runtime: server.runtime,
+    entry: server.entry,
+    command: server.command,
+    memoryLimit: Number(server.memoryLimit || 512),
+    status: isServerOnline(server.id) ? "online" : "offline",
+    suspended: Boolean(server.suspended),
+    suspendedAt: server.suspendedAt || null,
+    suspendedReason: server.suspendedReason || null,
+    protected: server.id === protectedId,
+    createdAt: server.createdAt,
+    runtimePort: Number(server.runtimePort || runtimePortForServer(server, users ? [] : [])),
+    runtimeWeb: runtimeWebUrl(server),
+    runtimeUrl: runtimeWebUrl(server),
+    pingUrl: runtimePingUrl(server)
+  };
+}
+
 app.get("/api/root/profile", auth, rootAuth, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const users = await readUsers();
   res.json({ account: { id: req.account.id, username: req.account.username, root: true, createdAt: req.account.createdAt }, users: users.map(u => ({ id: u.id, username: u.username, root: Boolean(u.root), createdAt: u.createdAt })) });
 });
@@ -511,19 +819,13 @@ app.post("/api/root/users", auth, rootAuth, async (req, res) => {
   const users = await readUsers();
   if (users.some(u => u.username === username)) return res.status(409).json({ error: "Username sudah digunakan" });
   const user = { id: id("usr"), username, password: await bcrypt.hash(password, 12), root, createdAt: new Date().toISOString() };
-  if (root) {
-    const roots = await readRootUsers();
-    roots.push(user);
-    await writeRootUsers(roots.filter(u => Boolean(u.root)), `Create root user ${username}`);
-  } else {
-    const locals = await readLocalUsers();
-    locals.push(user);
-    await writeLocalUsers(locals);
-  }
+  users.push(user);
+  await writeUsers(users, `Create user ${username}`);
   res.json({ id: user.id, username: user.username, root: user.root, createdAt: user.createdAt });
 });
 
 app.get("/api/root/access-keys", auth, rootAuth, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const keys = await readAccessKeys();
   res.json(keys.map(k => ({ id: k.id, name: k.name, prefix: k.prefix, ownerId: k.ownerId, scopes: k.scopes, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt || null, revokedAt: k.revokedAt || null })));
 });
@@ -553,191 +855,112 @@ app.post("/api/root/access-keys/:id/revoke", auth, rootAuth, async (req, res) =>
 app.post("/api/access/users", apiKeyAuth, requireScope("users:create"), async (req, res) => {
   const username = String(req.body.username || "").trim().toLowerCase();
   const password = String(req.body.password || "");
-  const root = Boolean(req.body.root);
-  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
-  if (password.length < 6) return res.status(400).json({ error: "Password minimal 6 karakter" });
-  // API keys may create normal users only; root elevation remains a root-panel action.
-  if (root) return res.status(403).json({ error: "API key tidak boleh membuat akun root" });
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) {
+    return res.status(400).json({ error: "Username 3-24 chars: a-z, 0-9, _" });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: "Password minimal 6 karakter" });
+  }
+
+  // Access keys can NEVER create/elevate a root account.
   const users = await readUsers();
-  if (users.some(u => u.username === username)) return res.status(409).json({ error: "Username sudah digunakan" });
-  const user = { id: id("usr"), username, password: await bcrypt.hash(password, 12), root: false, createdAt: new Date().toISOString() };
-  const locals = await readLocalUsers();
-  locals.push(user);
-  await writeLocalUsers(locals);
-  res.status(201).json({ id: user.id, username: user.username, root: false, createdAt: user.createdAt });
-});
+  if (users.some(u => u.username === username)) {
+    return res.status(409).json({ error: "Username sudah digunakan" });
+  }
 
-
-// ---------------------------------------------------------------------------
-// FULL ACCESS-KEY API
-// Access keys can manage non-root users and servers, inspect runtime stats,
-// and perform safe public-web health checks.
-// ---------------------------------------------------------------------------
-function apiServerView(s) {
-  const p = processes.get(s.id);
-  return {
-    ...publicServer(s),
-    ownerId: s.ownerId,
-    ownerUsername: null,
-    pid: p?.child?.pid || null,
-    uptime: p ? Math.floor((Date.now() - p.startedAt) / 1000) : 0
+  const user = {
+    id: id("usr"),
+    username,
+    password: await bcrypt.hash(password, 12),
+    root: false,
+    createdAt: new Date().toISOString()
   };
-}
 
-async function apiServerViewWithOwner(s) {
-  const view = apiServerView(s);
-  const owner = await findUserById(s.ownerId);
-  view.ownerUsername = owner?.username || null;
-  view.ownerRoot = Boolean(owner?.root);
-  return view;
-}
+  users.push(user);
+  await writeUsers(users, `API create user ${username}`);
 
-async function apiAllServers() {
-  const servers = await readJson(SERVERS_FILE);
-  return Promise.all(servers.map(apiServerViewWithOwner));
-}
-
-function isPrivateIp(address) {
-  const family = net.isIP(address);
-  if (family === 4) {
-    const [a,b,c,d] = address.split(".").map(Number);
-    return a === 10 ||
-      a === 127 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      a === 0 ||
-      a >= 224;
-  }
-  if (family === 6) {
-    const x = address.toLowerCase();
-    return x === "::1" || x === "::" || x.startsWith("fc") || x.startsWith("fd") ||
-      x.startsWith("fe8") || x.startsWith("fe9") || x.startsWith("fea") || x.startsWith("feb");
-  }
-  return true;
-}
-
-async function assertSafeWebUrl(raw) {
-  const u = new URL(String(raw || ""));
-  if (!["http:", "https:"].includes(u.protocol)) throw new Error("URL hanya boleh http:// atau https://");
-  if (u.username || u.password) throw new Error("URL dengan credential tidak diizinkan");
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  const addresses = [];
-  if (net.isIP(host)) addresses.push(host);
-  else {
-    const records = await dns.lookup(host, { all: true, verbatim: true });
-    addresses.push(...records.map(x => x.address));
-  }
-  if (!addresses.length || addresses.some(isPrivateIp)) {
-    throw new Error("Host tujuan bukan alamat publik yang diizinkan");
-  }
-  return u;
-}
-
-async function pingPublicWeb(rawUrl, timeoutMs = 8000) {
-  let current = String(rawUrl || "").trim();
-  const started = Date.now();
-  let last = null;
-  for (let hop = 0; hop < 4; hop++) {
-    const u = await assertSafeWebUrl(current);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const r = await fetch(u, {
-        method: "GET",
-        redirect: "manual",
-        signal: controller.signal,
-        headers: { "User-Agent": "FRANXX-PTERO-WebMonitor/1.0" }
-      });
-      const location = r.headers.get("location");
-      if (r.status >= 300 && r.status < 400 && location) {
-        current = new URL(location, u).toString();
-        last = { status: r.status, redirected: true };
-        continue;
-      }
-      const latency = Date.now() - started;
-      return {
-        ok: r.ok,
-        status: r.status,
-        statusText: r.statusText,
-        latencyMs: latency,
-        url: u.toString(),
-        checkedAt: new Date().toISOString(),
-        contentType: r.headers.get("content-type"),
-        server: r.headers.get("server")
-      };
-    } catch (e) {
-      return {
-        ok: false,
-        status: 0,
-        statusText: e.name === "AbortError" ? "TIMEOUT" : (e.message || "FETCH_ERROR"),
-        latencyMs: Date.now() - started,
-        url: u.toString(),
-        checkedAt: new Date().toISOString()
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return {
-    ok: false,
-    status: last?.status || 0,
-    statusText: "TOO_MANY_REDIRECTS",
-    latencyMs: Date.now() - started,
-    url: current,
-    checkedAt: new Date().toISOString()
-  };
-}
-
-app.get("/api/access/overview", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
-  const [users, servers] = await Promise.all([readUsers(), apiAllServers()]);
   res.json({
     ok: true,
-    users: { total: users.length, root: users.filter(u => u.root).length, normal: users.filter(u => !u.root).length },
-    servers: {
-      total: servers.length,
-      online: servers.filter(s => s.status === "online").length,
-      offline: servers.filter(s => s.status === "offline").length,
-      suspended: servers.filter(s => s.status === "suspended").length
-    },
-    platform: { node: process.version, platform: process.platform, arch: process.arch, uptime: Math.floor(process.uptime()) }
+    id: user.id,
+    username: user.username,
+    root: false,
+    createdAt: user.createdAt
   });
 });
 
 app.get("/api/access/users", apiKeyAuth, requireScope("users:read"), async (req, res) => {
-  const [users, servers] = await Promise.all([readUsers(), readJson(SERVERS_FILE)]);
-  res.json(users.map(u => ({
-    id: u.id, username: u.username, root: Boolean(u.root), createdAt: u.createdAt,
-    serverCount: servers.filter(s => s.ownerId === u.id).length
-  })));
+  const users = await getAllUsersForApi();
+  res.json({
+    total: users.length,
+    users: users.map(u => ({
+      id: u.id,
+      username: u.username,
+      root: Boolean(u.root) || String(u.username).toLowerCase() === ROOT_USERNAME.toLowerCase(),
+      createdAt: u.createdAt
+    }))
+  });
 });
 
 app.get("/api/access/users/:id", apiKeyAuth, requireScope("users:read"), async (req, res) => {
-  const user = await findUserById(req.params.id);
+  const users = await getAllUsersForApi();
+  const user = users.find(u => String(u.id) === String(req.params.id));
   if (!user) return res.status(404).json({ error: "User tidak ditemukan" });
-  const servers = (await readJson(SERVERS_FILE)).filter(s => s.ownerId === user.id);
-  res.json({ id: user.id, username: user.username, root: Boolean(user.root), createdAt: user.createdAt, servers: servers.map(publicServer) });
+
+  const servers = await getAllServers();
+  res.json({
+    id: user.id,
+    username: user.username,
+    root: Boolean(user.root) || String(user.username).toLowerCase() === ROOT_USERNAME.toLowerCase(),
+    createdAt: user.createdAt,
+    servers: servers.filter(s => String(s.ownerId) === String(user.id)).map(s => s.id)
+  });
 });
 
 app.delete("/api/access/users/:id", apiKeyAuth, requireScope("users:delete"), async (req, res) => {
-  const user = await findUserById(req.params.id);
+  const users = await getAllUsersForApi();
+  const user = users.find(u => String(u.id) === String(req.params.id));
   if (!user) return res.status(404).json({ error: "User tidak ditemukan" });
-  if (user.root) return res.status(403).json({ error: "Akun ROOT/ADMIN dilindungi dan tidak dapat dihapus lewat API" });
-  const servers = await readJson(SERVERS_FILE);
-  if (servers.some(s => s.ownerId === user.id)) {
-    return res.status(409).json({ error: "User masih memiliki server. Hapus server offline terlebih dahulu." });
+
+  const isRoot = Boolean(user.root) || String(user.username).toLowerCase() === ROOT_USERNAME.toLowerCase();
+  if (isRoot) {
+    return res.status(403).json({ error: "Akun ROOT/ADMIN tidak boleh dihapus melalui API key" });
   }
-  const locals = await readLocalUsers();
-  await writeLocalUsers(locals.filter(u => u.id !== user.id));
-  res.json({ ok: true, deleted: user.id });
+
+  const servers = await getAllServers();
+  const owned = servers.filter(s => String(s.ownerId) === String(user.id));
+  const online = owned.filter(s => isServerOnline(s.id));
+  if (online.length) {
+    return res.status(409).json({
+      error: "User masih memiliki server yang online. Stop server terlebih dahulu.",
+      onlineServers: online.map(s => s.id)
+    });
+  }
+
+  const nextServers = servers.filter(s => String(s.ownerId) !== String(user.id));
+  await writeJson(SERVERS_FILE, nextServers);
+  for (const s of owned) {
+    await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
+  }
+
+  const nextUsers = users.filter(u => String(u.id) !== String(user.id));
+  await writeUsers(nextUsers, `API delete user ${user.username}`);
+
+  res.json({
+    ok: true,
+    deletedUser: user.id,
+    deletedServers: owned.map(s => s.id)
+  });
 });
 
+// Create server through an access key. The owner must already exist and
+// is always used as a normal account; the API key itself never becomes root.
 app.post("/api/access/servers", apiKeyAuth, requireScope("servers:create"), async (req, res) => {
   const ownerId = String(req.body.userId || "").trim();
-  if (!ownerId) return res.status(400).json({ error: "userId wajib diisi saat memakai access key" });
-  const owner = await findUserById(ownerId);
-  if (!owner || owner.root) return res.status(404).json({ error: "User tujuan non-root tidak ditemukan" });
+  if (!ownerId) return res.status(400).json({ error: "userId wajib diisi" });
+
+  const users = await getAllUsersForApi();
+  const owner = users.find(u => String(u.id) === ownerId);
+  if (!owner) return res.status(404).json({ error: "User tujuan tidak ditemukan" });
 
   const name = safeName(req.body.name || "My Server");
   const runtime = ["node", "python", "custom"].includes(req.body.runtime) ? req.body.runtime : "node";
@@ -745,164 +968,262 @@ app.post("/api/access/servers", apiKeyAuth, requireScope("servers:create"), asyn
   const command = String(req.body.command || (runtime === "python" ? "python main.py" : "node index.js")).trim();
   if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
   const memoryLimit = parseMemoryMB(req.body.memoryLimit, 512);
-  const webUrl = String(req.body.webUrl || "").trim().slice(0, 500);
-  const webPort = Number(req.body.webPort || 0);
-  if (webUrl && !/^https?:\/\//i.test(webUrl)) return res.status(400).json({ error: "webUrl harus http:// atau https://" });
-  if (webPort && (!Number.isInteger(webPort) || webPort < 1 || webPort > 65535)) return res.status(400).json({ error: "webPort tidak valid" });
 
-  const servers = await readJson(SERVERS_FILE);
-  const serverRecord = {
-    id: id("srv"), ownerId, name, runtime, entry, command, memoryLimit,
-    env: {}, webUrl: webUrl || null, webPort: webPort || null,
-    suspended: false, createdAt: new Date().toISOString()
+  const servers = await getAllServers();
+  const s = {
+    id: id("srv"),
+    ownerId,
+    name,
+    runtime,
+    entry,
+    command,
+    memoryLimit,
+    env: {},
+    runtimePort: runtimePortForServer({ id: "pending_" + crypto.randomBytes(4).toString("hex") }, servers),
+    suspended: false,
+    createdAt: new Date().toISOString()
   };
-  servers.push(serverRecord);
+  s.runtimePort = runtimePortForServer(s, servers);
+
+  servers.push(s);
   await writeJson(SERVERS_FILE, servers);
-  await fsp.mkdir(serverRoot(serverRecord.id), { recursive: true });
-  res.status(201).json(await apiServerViewWithOwner(serverRecord));
+  await fsp.mkdir(serverRoot(s.id), { recursive: true });
+
+  const protectedId = protectedRootServerId(servers, users);
+  res.json({ ok: true, server: apiServerView(s, users, protectedId) });
 });
 
 app.get("/api/access/servers", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
-  res.json(await apiAllServers());
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const protectedId = protectedRootServerId(servers, users);
+  const list = servers.map(s => apiServerView(s, users, protectedId));
+  res.json({ total: list.length, servers: list });
 });
 
 app.get("/api/access/servers/total", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
-  const servers = await readJson(SERVERS_FILE);
+  const servers = await getAllServers();
   res.json({ total: servers.length });
 });
 
 app.get("/api/access/servers/:id", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const s = servers.find(x => x.id === req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  res.json(await apiServerViewWithOwner(s));
+  const protectedId = protectedRootServerId(servers, users);
+  res.json(apiServerView(s, users, protectedId));
 });
 
-app.get("/api/access/servers/:id/stats", apiKeyAuth, requireScope("stats:read"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+async function getApiServerOr404(req, res) {
+  const servers = await getAllServers();
+  const s = servers.find(x => x.id === req.params.id);
+  if (!s) {
+    res.status(404).json({ error: "Server tidak ditemukan" });
+    return null;
+  }
+  return { servers, server: s };
+}
+
+app.post("/api/access/servers/:id/start", apiKeyAuth, requireScope("servers:start"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const { server: s, servers } = found;
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
+  if (isServerOnline(s.id)) return res.json({ ok: true, status: "online", alreadyRunning: true });
+  try {
+    runServer(s);
+    res.json({ ok: true, status: "online" });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/stop", apiKeyAuth, requireScope("servers:stop"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  try {
+    await stopServer(found.server.id);
+    res.json({ ok: true, status: "offline" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/restart", apiKeyAuth, requireScope("servers:restart"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
+  try {
+    if (isServerOnline(s.id)) await stopServer(s.id);
+    runServer(s);
+    res.json({ ok: true, status: "online" });
+  } catch (e) {
+    broadcastServer(s.id, { type: "log", data: `\n[api restart error] ${e.message}\n` });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/suspend", apiKeyAuth, requireScope("servers:suspend"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  try {
+    if (isServerOnline(s.id)) await stopServer(s.id);
+    s.suspended = true;
+    s.suspendedAt = new Date().toISOString();
+    s.suspendedReason = String(req.body.reason || "Suspended by API").slice(0, 200);
+    await writeJson(SERVERS_FILE, found.servers);
+    res.json({ ok: true, status: "offline", suspended: true, reason: s.suspendedReason });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/access/servers/:id/unsuspend", apiKeyAuth, requireScope("servers:unsuspend"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
+  s.suspended = false;
+  s.suspendedAt = null;
+  s.suspendedReason = null;
+  await writeJson(SERVERS_FILE, found.servers);
+  res.json({ ok: true, status: isServerOnline(s.id) ? "online" : "offline", suspended: false });
+});
+
+app.get("/api/access/servers/:id/stats", apiKeyAuth, requireScope("servers:stats"), async (req, res) => {
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const s = found.server;
   const p = processes.get(s.id);
   const disk = await directorySize(serverRoot(s.id));
   const proc = p ? readProcessStats(p.child.pid) : null;
   res.json({
-    id: s.id, name: s.name, status: s.suspended ? "suspended" : (p ? "online" : "offline"),
+    id: s.id,
+    status: p ? "online" : "offline",
+    suspended: Boolean(s.suspended),
     uptime: p ? Math.floor((Date.now() - p.startedAt) / 1000) : 0,
     memory: proc?.memory || 0,
     memoryLimit: Number(s.memoryLimit || 512) * 1024 * 1024,
     cpu: proc ? Number(proc.cpu.toFixed(1)) : 0,
     storage: disk,
-    web: { url: s.webUrl || null, port: s.webPort || null },
-    platform: process.platform, node: process.version,
-    hostMemory: os.totalmem(), hostFreeMemory: os.freemem()
+    runtimeWeb: runtimeWebUrl(s),
+    runtimeUrl: runtimeWebUrl(s),
+    pingUrl: runtimePingUrl(s),
+    runtimePort: Number(s.runtimePort || runtimePortForServer(s))
   });
-});
-
-async function setServerSuspended(serverId, suspended) {
-  const servers = await readJson(SERVERS_FILE);
-  const s = servers.find(x => x.id === serverId);
-  if (!s) return null;
-  if (suspended) await stopServer(s.id);
-  s.suspended = suspended;
-  await writeJson(SERVERS_FILE, servers);
-  return s;
-}
-
-app.post("/api/access/servers/:id/start", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend" });
-  try { runServer(s); res.json({ ok: true, server: await apiServerViewWithOwner(s) }); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-app.post("/api/access/servers/:id/stop", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  await stopServer(s.id);
-  res.json({ ok: true });
-});
-
-app.post("/api/access/servers/:id/restart", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend" });
-  try { await stopServer(s.id); runServer(s); res.json({ ok: true }); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-app.post("/api/access/servers/:id/suspend", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const s = await setServerSuspended(req.params.id, true);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  res.json({ ok: true, suspended: true });
-});
-
-app.post("/api/access/servers/:id/unsuspend", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const s = await setServerSuspended(req.params.id, false);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  res.json({ ok: true, suspended: false });
 });
 
 app.delete("/api/access/servers/:id", apiKeyAuth, requireScope("servers:delete"), async (req, res) => {
-  const servers = await readJson(SERVERS_FILE);
-  const s = servers.find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  const owner = await findUserById(s.ownerId);
-  if (owner?.root) return res.status(403).json({ error: "Server milik ROOT/ADMIN dilindungi dan tidak dapat dihapus lewat API" });
-  if (processes.has(s.id)) return res.status(409).json({ error: "Server harus OFFLINE sebelum dihapus" });
+  const found = await getApiServerOr404(req, res);
+  if (!found) return;
+  const { servers, server: s } = found;
+  const users = await getAllUsersForApi();
+  const protectedId = protectedRootServerId(servers, users);
+
+  if (s.id === protectedId) {
+    return res.status(403).json({
+      error: "Server ROOT/ADMIN pertama dilindungi dan tidak boleh dihapus melalui API"
+    });
+  }
+
+  // API deletion is intentionally offline-only.
+  if (isServerOnline(s.id)) {
+    return res.status(409).json({
+      error: "Server masih online. Stop server terlebih dahulu sebelum delete."
+    });
+  }
+
   await writeJson(SERVERS_FILE, servers.filter(x => x.id !== s.id));
   await fsp.rm(serverRoot(s.id), { recursive: true, force: true });
+
   res.json({ ok: true, deleted: s.id });
 });
 
-app.put("/api/access/servers/:id/settings", apiKeyAuth, requireScope("servers:manage"), async (req, res) => {
-  const servers = await readJson(SERVERS_FILE);
-  const s = servers.find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  const command = String(req.body.command ?? s.command).trim();
-  const entry = safeName(req.body.entry || s.entry);
-  const memoryLimit = parseMemoryMB(req.body.memoryLimit, s.memoryLimit || 512);
-  const webUrl = String(req.body.webUrl ?? s.webUrl ?? "").trim().slice(0, 500);
-  const webPort = Number(req.body.webPort ?? s.webPort ?? 0);
-  if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
-  if (webUrl && !/^https?:\/\//i.test(webUrl)) return res.status(400).json({ error: "webUrl harus http:// atau https://" });
-  if (webPort && (!Number.isInteger(webPort) || webPort < 1 || webPort > 65535)) return res.status(400).json({ error: "webPort tidak valid" });
-  s.command = command;
-  s.entry = entry;
-  s.memoryLimit = memoryLimit;
-  s.webUrl = webUrl || null;
-  s.webPort = webPort || null;
-  await writeJson(SERVERS_FILE, servers);
-  res.json({ ok: true, server: await apiServerViewWithOwner(s) });
-});
+app.get("/api/access/overview", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const [servers, users] = await Promise.all([getAllServers(), getAllUsersForApi()]);
+  const protectedId = protectedRootServerId(servers, users);
+  const online = servers.filter(s => isServerOnline(s.id)).length;
+  const suspended = servers.filter(s => Boolean(s.suspended)).length;
 
-app.get("/api/access/servers/:id/runtime", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  const p = processes.get(s.id);
   res.json({
-    server: await apiServerViewWithOwner(s),
-    runtime: {
-      running: Boolean(p), pid: p?.child?.pid || null,
-      uptime: p ? Math.floor((Date.now() - p.startedAt) / 1000) : 0,
-      command: s.command, cwd: serverRoot(s.id),
-      webUrl: s.webUrl || null, webPort: s.webPort || null
-    }
+    users: users.length,
+    servers: servers.length,
+    onlineServers: online,
+    offlineServers: servers.length - online,
+    suspendedServers: suspended,
+    protectedRootServerId: protectedId
   });
 });
 
-app.post("/api/access/servers/:id/web/ping", apiKeyAuth, requireScope("web:ping"), async (req, res) => {
-  const s = (await readJson(SERVERS_FILE)).find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  const url = String(req.body.url || s.webUrl || "").trim();
-  if (!url) return res.status(400).json({ error: "Server belum memiliki webUrl dan body.url kosong" });
-  try { res.json({ ok: true, serverId: s.id, ping: await pingPublicWeb(url) }); }
-  catch (e) { res.status(400).json({ error: e.message }); }
+// ---------------------------------------------------------------------------
+// Runtime Web / Ping
+// ---------------------------------------------------------------------------
+app.get("/runtime/:id", async (req, res) => {
+  res.redirect(302, `/runtime/${encodeURIComponent(req.params.id)}/`);
 });
 
-app.post("/api/access/web/ping", apiKeyAuth, requireScope("web:ping"), async (req, res) => {
-  const url = String(req.body.url || "").trim();
-  if (!url) return res.status(400).json({ error: "url wajib diisi" });
-  try { res.json(await pingPublicWeb(url)); }
-  catch (e) { res.status(400).json({ error: e.message }); }
+app.use("/runtime/:id", async (req, res, next) => {
+  try {
+    const servers = await getAllServers();
+    const s = servers.find(x => String(x.id) === String(req.params.id));
+    if (!s) return res.status(404).send("Runtime tidak ditemukan");
+    if (!isServerOnline(s.id)) return res.status(503).send("Runtime sedang offline");
+
+    const port = Number(s.runtimePort || runtimePortForServer(s, servers));
+    const targetPath = req.path || "/";
+    const headers = { ...req.headers, host: `127.0.0.1:${port}`, "x-forwarded-host": req.headers.host || "", "x-forwarded-proto": req.protocol };
+    delete headers.connection;
+    delete headers["content-length"];
+
+    const proxy = http.request({
+      hostname: "127.0.0.1",
+      port,
+      method: req.method,
+      path: targetPath + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""),
+      headers
+    }, upstream => {
+      res.status(upstream.statusCode || 502);
+      for (const [key, value] of Object.entries(upstream.headers)) {
+        if (value !== undefined && key.toLowerCase() !== "connection") res.setHeader(key, value);
+      }
+      upstream.pipe(res);
+    });
+
+    proxy.on("error", err => {
+      if (!res.headersSent) res.status(502).send(`Runtime proxy error: ${err.message}`);
+      else res.end();
+    });
+    req.pipe(proxy);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.get("/api/runtime/:id/ping", auth, async (req, res) => {
+  const servers = await getAllServers();
+  const s = servers.find(x => String(x.id) === String(req.params.id) && String(x.ownerId) === String(req.user.id));
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  const runtime = runtimeState(s);
+  const ping = runtime.online ? await pingLocalRuntime(runtime.port, "/") : { ok: false, status: 0, responseTimeMs: 0, error: "RUNTIME_OFFLINE" };
+  res.json({ ok: ping.ok, serverId: s.id, status: runtime.status, runtimeWeb: runtime.web, pingUrl: runtime.pingUrl, port: runtime.port, ...ping });
+});
+
+app.get("/api/access/servers/:id/runtime", apiKeyAuth, requireScope("servers:read"), async (req, res) => {
+  const servers = await getAllServers();
+  const s = servers.find(x => String(x.id) === String(req.params.id));
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  const runtime = runtimeState(s);
+  const ping = runtime.online ? await pingLocalRuntime(runtime.port, "/") : { ok: false, status: 0, responseTimeMs: 0, error: "RUNTIME_OFFLINE" };
+  res.json({ ok: true, serverId: s.id, name: s.name, runtime, ping });
+});
+
+app.get("/api/access/servers/:id/ping", apiKeyAuth, requireScope("servers:stats"), async (req, res) => {
+  const servers = await getAllServers();
+  const s = servers.find(x => String(x.id) === String(req.params.id));
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  const runtime = runtimeState(s);
+  const ping = runtime.online ? await pingLocalRuntime(runtime.port, String(req.query.path || "/")) : { ok: false, status: 0, responseTimeMs: 0, error: "RUNTIME_OFFLINE" };
+  res.status(ping.ok ? 200 : 503).json({ ...ping, serverId: s.id, runtimeWeb: runtime.web, pingUrl: runtime.pingUrl, port: runtime.port });
 });
 
 app.get("/api/servers", auth, async (req, res) => {
@@ -930,17 +1251,13 @@ app.post("/api/servers", async (req, res, next) => {
   const command = String(req.body.command || (runtime === "python" ? "python main.py" : "node index.js")).trim();
   if (!command || command.length > 300) return res.status(400).json({ error: "Command tidak valid" });
   const memoryLimit = parseMemoryMB(req.body.memoryLimit, 512);
-  const webUrl = String(req.body.webUrl || "").trim().slice(0, 500);
-  const webPort = Number(req.body.webPort || 0);
-  if (webUrl && !/^https?:\/\//i.test(webUrl)) return res.status(400).json({ error: "webUrl harus http:// atau https://" });
-  if (webPort && (!Number.isInteger(webPort) || webPort < 1 || webPort > 65535)) return res.status(400).json({ error: "webPort tidak valid" });
 
   const servers = await readJson(SERVERS_FILE);
   const s = {
     id: id("srv"), ownerId, name, runtime, entry, command,
-    memoryLimit, env: {}, webUrl: webUrl || null, webPort: webPort || null,
-    suspended: false, createdAt: new Date().toISOString()
+    memoryLimit, env: {}, runtimePort: 0, createdAt: new Date().toISOString()
   };
+  s.runtimePort = runtimePortForServer(s, servers);
   servers.push(s);
   await writeJson(SERVERS_FILE, servers);
   await fsp.mkdir(serverRoot(s.id), { recursive: true });
@@ -960,7 +1277,7 @@ app.delete("/api/servers/:id", auth, async (req, res) => {
 app.post("/api/servers/:id/start", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
-  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend" });
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
   try { runServer(s); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -979,6 +1296,7 @@ app.post("/api/servers/:id/stop", auth, async (req, res) => {
 app.post("/api/servers/:id/restart", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  if (s.suspended) return res.status(423).json({ error: "Server sedang disuspend", suspended: true });
   try {
     await stopServer(s.id);
     runServer(s);
@@ -1232,14 +1550,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || "Internal server error" });
 });
 
-(async () => {
-  try {
-    await migrateLegacyGithubUsers();
-    console.log(`FX PROJECT — storage: ${DATA}`);
-  } catch (e) {
-    console.error("Database migration warning:", e.message);
-  }
-  server.listen(PORT, HOST, () => {
-    console.log(`FX PROJECT — FRANXX PTERO running on ${HOST}:${PORT}`);
-  });
-})();
+server.listen(PORT, HOST, () => {
+  console.log(`FX PROJECT — FRANXX PTERO running on ${HOST}:${PORT}`);
+});
