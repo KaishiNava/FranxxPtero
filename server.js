@@ -430,26 +430,90 @@ app.put("/api/servers/:id/settings", auth, async (req, res) => {
 });
 
 
+function normalizeArchiveEntryName(name) {
+  return String(name || "").replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function safeArchiveTarget(baseDir, entryName) {
+  const clean = normalizeArchiveEntryName(entryName);
+  if (!clean || clean === ".") return path.resolve(baseDir);
+  const base = path.resolve(baseDir);
+  const target = path.resolve(base, clean);
+  if (!target.startsWith(base + path.sep) && target !== base) {
+    throw new Error("ZIP berisi path tidak aman");
+  }
+  return target;
+}
+
 app.post("/api/servers/:id/unzip", auth, async (req, res) => {
   const s = await getOwnedServer(req.user.id, req.params.id);
   if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
   try {
-    const rel = String(req.body.path || "");
+    const rel = String(req.body.path || "").replace(/^\/+/, "");
     if (!rel.toLowerCase().endsWith(".zip")) return res.status(400).json({ error: "File harus .zip" });
     const zipPath = safeServerPath(req.user.id, s.id, rel);
     const stat = await fsp.stat(zipPath);
     if (!stat.isFile()) return res.status(400).json({ error: "Bukan file" });
 
+    // Extract beside the ZIP, not always into server root. This keeps nested
+    // containers such as ptero/public/root intact and immediately navigable.
+    const destination = path.dirname(zipPath);
+    const zip = new AdmZip(zipPath);
+    const entries = zip.getEntries();
+    for (const entry of entries) safeArchiveTarget(destination, entry.entryName);
+    zip.extractAllTo(destination, true);
+
+    const topLevel = [...new Set(entries.map(e => normalizeArchiveEntryName(e.entryName).split("/")[0]).filter(Boolean))];
+    res.json({
+      ok: true,
+      message: "ZIP berhasil di-extract",
+      destination: path.relative(serverRoot(s.id), destination).replace(/\\/g, "/"),
+      topLevel
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post("/api/servers/:id/move-to-root", auth, async (req, res) => {
+  const s = await getOwnedServer(req.user.id, req.params.id);
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  try {
+    const paths = Array.isArray(req.body.paths) ? req.body.paths.slice(0, 100) : [];
+    if (!paths.length) return res.status(400).json({ error: "Tidak ada file atau folder yang dipilih" });
+
     const root = path.resolve(serverRoot(s.id));
-    const zip = new (require("adm-zip"))(zipPath);
-    for (const entry of zip.getEntries()) {
-      const target = path.resolve(root, entry.entryName);
-      if (!target.startsWith(root + path.sep) && target !== root) {
-        return res.status(400).json({ error: "ZIP berisi path tidak aman" });
+    const items = paths.map(raw => {
+      const clean = String(raw || "").replace(/^\/+/, "");
+      if (!clean || clean === ".") throw new Error("Root folder tidak bisa dipindahkan");
+      const source = safeServerPath(req.user.id, s.id, clean);
+      const relative = path.relative(root, source);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Invalid path");
+      return { clean, source, name: path.basename(source), relative };
+    });
+
+    // Prevent ambiguous operations such as selecting both a folder and one of
+    // its children in the same move request.
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const a = path.relative(items[i].source, items[j].source);
+        const b = path.relative(items[j].source, items[i].source);
+        if ((a && !a.startsWith("..") && !path.isAbsolute(a)) || (b && !b.startsWith("..") && !path.isAbsolute(b))) {
+          throw new Error("Jangan pilih folder dan isi di dalamnya sekaligus");
+        }
       }
     }
-    zip.extractAllTo(root, true);
-    res.json({ ok: true, message: "ZIP berhasil di-extract" });
+
+    const destinations = items.map(item => path.join(root, item.name));
+    const destinationSet = new Set(destinations.map(p => path.resolve(p)));
+    for (const dest of destinations) {
+      if (destinationSet.size !== destinations.length || await fsp.access(dest).then(() => true).catch(() => false)) {
+        throw new Error(`Item dengan nama "${path.basename(dest)}" sudah ada di root`);
+      }
+    }
+
+    for (let i = 0; i < items.length; i++) await fsp.rename(items[i].source, destinations[i]);
+    res.json({ ok: true, moved: items.map(x => x.name), destination: "/" });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
