@@ -152,12 +152,17 @@ function broadcastServer(serverId, payload) {
   }
 }
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", async (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const token = url.searchParams.get("token");
   const serverId = url.searchParams.get("server");
   try {
     const user = jwt.verify(token || "", JWT_SECRET);
+    const owned = await getOwnedServer(user.id, serverId);
+    if (!owned) {
+      ws.close(1008, "Unauthorized");
+      return;
+    }
     ws.userId = user.id;
     ws.serverId = serverId;
     ws.send(JSON.stringify({ type: "connected", serverId }));
@@ -166,7 +171,7 @@ wss.on("connection", (ws, req) => {
         const msg = JSON.parse(String(raw));
         if (msg.type === "stdin") {
           const p = processes.get(serverId);
-          if (p && p.child && p.child.stdin.writable) {
+          if (p && p.child && p.child.stdin && p.child.stdin.writable) {
             p.child.stdin.write(String(msg.data ?? "") + "\n");
           }
         }
@@ -383,6 +388,25 @@ app.delete("/api/servers/:id/file", auth, async (req, res) => {
     await fsp.rm(p, { recursive: true, force: true });
     res.json({ok:true});
   } catch(e) { res.status(400).json({error:e.message}); }
+});
+
+app.delete("/api/servers/:id/files/bulk", auth, async (req, res) => {
+  const s = await getOwnedServer(req.user.id, req.params.id);
+  if (!s) return res.status(404).json({ error: "Server tidak ditemukan" });
+  try {
+    const paths = Array.isArray(req.body.paths) ? req.body.paths.slice(0, 500) : [];
+    if (!paths.length) return res.status(400).json({ error: "Tidak ada file yang dipilih" });
+    for (const rel of paths) {
+      const clean = String(rel || "").replace(/^\/+/, "");
+      if (!clean || clean === ".") continue;
+      const target = safeServerPath(req.user.id, s.id, clean);
+      const root = path.resolve(serverRoot(s.id));
+      const relative = path.relative(root, target);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Invalid path");
+      await fsp.rm(target, { recursive: true, force: true });
+    }
+    res.json({ ok: true, deleted: paths.length });
+  } catch(e) { res.status(400).json({ error: e.message }); }
 });
 
 app.put("/api/servers/:id/settings", auth, async (req, res) => {
